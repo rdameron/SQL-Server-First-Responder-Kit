@@ -29,7 +29,7 @@ ALTER PROCEDURE [dbo].[sp_Blitz]
 AS
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-	SET @VersionDate = '20161014';
+	SET @VersionDate = '20161022';
 	SET @OutputType = UPPER(@OutputType);
 
 	IF @Help = 1 PRINT '
@@ -136,7 +136,9 @@ AS
 			,@MsSinceWaitsCleared DECIMAL(38,0)
 			,@CpuMsSinceWaitsCleared DECIMAL(38,0)
 			,@ResultText NVARCHAR(MAX)
-			,@crlf NVARCHAR(2);
+			,@crlf NVARCHAR(2)
+			,@Processors int
+			,@NUMANodes int;
 
 
 		SET @crlf = NCHAR(13) + NCHAR(10);
@@ -469,7 +471,7 @@ AS
             FROM sys.fn_trace_getinfo(1)
             WHERE traceid=1 AND property=2;
         
-        SELECT @MsSinceWaitsCleared = DATEDIFF(MINUTE, create_date, CURRENT_TIMESTAMP) * 60000
+        SELECT @MsSinceWaitsCleared = DATEDIFF(MINUTE, create_date, CURRENT_TIMESTAMP) * 60000.0
             FROM    sys.databases
             WHERE   name='tempdb';
 
@@ -1497,6 +1499,40 @@ AS
 										LEFT OUTER JOIN #ConfigurationDefaults cdUsed ON cdUsed.name = cr.name
 																  AND cdUsed.DefaultValue = cr.value_in_use
 								WHERE   cdUsed.name IS NULL;
+					END
+
+				IF NOT EXISTS ( SELECT  1
+								FROM    #SkipChecks
+								WHERE   DatabaseName IS NULL AND CheckID = 188 )
+					BEGIN
+
+						/* Let's set variables so that our query is still SARGable */
+						SET @Processors = (SELECT cpu_count FROM sys.dm_os_sys_info)
+						SET @NUMANodes = (SELECT COUNT(1)
+											FROM sys.dm_os_performance_counters pc
+											WHERE pc.object_name LIKE '%Buffer Node%'
+												AND counter_name = 'Page life expectancy')
+						/* If Cost Threshold for Parallelism is default then flag as a potential issue */
+						/* If MAXDOP is default and processors > 8 or NUMA nodes > 1 then flag as potential issue */
+						INSERT INTO #BlitzResults
+								( CheckID ,
+								  Priority ,
+								  FindingsGroup ,
+								  Finding ,
+								  URL ,
+								  Details
+								)
+								SELECT  188 AS CheckID ,
+										200 AS Priority ,
+										'Performance' AS FindingsGroup ,
+										cr.name AS Finding ,
+										'http://BrentOzar.com/go/cxpacket' AS URL ,
+										( 'Set to ' + CAST(cr.value_in_use AS NVARCHAR(50)) + ', its default value. Changing this sp_configure setting may reduce CXPACKET waits.')
+								FROM    sys.configurations cr
+										INNER JOIN #ConfigurationDefaults cd ON cd.name = cr.name
+											AND cr.value_in_use = cd.DefaultValue
+								WHERE   cr.name = 'cost threshold for parallelism'
+									OR (cr.name = 'max degree of parallelism' AND (@NUMANodes > 1 OR @Processors > 8));
 					END
 
 
@@ -2594,9 +2630,9 @@ AS
 											'Performance' AS FindingGroup ,
 											'Poison Wait Detected: Serializable Locking'  AS Finding ,
 											'http://BrentOzar.com/go/serializable' AS URL ,
-											CONVERT(VARCHAR(10), (SUM([wait_time_ms]) / 1000) / 86400) + ':' + CONVERT(VARCHAR(20), DATEADD(s, (SUM([wait_time_ms]) / 1000), 0), 108) + ' of LCK_R% waits have been recorded. This wait often indicates killer performance problems.'
+											CONVERT(VARCHAR(10), (SUM([wait_time_ms]) / 1000) / 86400) + ':' + CONVERT(VARCHAR(20), DATEADD(s, (SUM([wait_time_ms]) / 1000), 0), 108) + ' of LCK_M_R% waits have been recorded. This wait often indicates killer performance problems.'
 									FROM sys.[dm_os_wait_stats]
-									WHERE wait_type LIKE '%LCK%R%'
+									WHERE wait_type IN ('LCK_M_RS_S', 'LCK_M_RS_U', 'LCK_M_RIn_NL','LCK_M_RIn_S', 'LCK_M_RIn_U','LCK_M_RIn_X', 'LCK_M_RX_S', 'LCK_M_RX_U','LCK_M_RX_X')
 								    HAVING SUM([wait_time_ms]) > (SELECT 5000 * datediff(HH,create_date,CURRENT_TIMESTAMP) AS hours_since_startup FROM sys.databases WHERE name='tempdb')
 									AND SUM([wait_time_ms]) > 60000
 						END
