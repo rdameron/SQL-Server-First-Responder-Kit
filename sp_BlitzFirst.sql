@@ -29,7 +29,7 @@ AS
 BEGIN
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-SET @VersionDate = '20161210'
+SET @VersionDate = '20170201'
 
 IF @Help = 1 PRINT '
 sp_BlitzFirst from http://FirstResponderKit.org
@@ -131,7 +131,7 @@ IF @Seconds = 0 AND CAST(SERVERPROPERTY('edition') AS VARCHAR(100)) = 'SQL Azure
         WHERE wait_type IN ('BROKER_TASK_STOP','DIRTY_PAGE_POLL','HADR_FILESTREAM_IOMGR_IOCOMPLETION','LAZYWRITER_SLEEP',
                             'LOGMGR_QUEUE','REQUEST_FOR_DEADLOCK_SEARCH','XE_DISPATCHER_WAIT','XE_TIMER_EVENT')
 ELSE IF @Seconds = 0 AND CAST(SERVERPROPERTY('edition') AS VARCHAR(100)) <> 'SQL Azure'
-    SELECT @StartSampleTime = create_date , @FinishSampleTime = SYSDATETIMEOFFSET()
+    SELECT @StartSampleTime = DATEADD(MINUTE,DATEDIFF(MINUTE, GETDATE(), GETUTCDATE()),create_date) , @FinishSampleTime = SYSDATETIMEOFFSET()
         FROM sys.databases
         WHERE database_id = 2;
 ELSE
@@ -167,7 +167,7 @@ BEGIN
     /* What's running right now? This is the first and last result set. */
     IF @SinceStartup = 0 AND @Seconds > 0 AND @ExpertMode = 1 
     BEGIN
-		IF OBJECT_ID('dbo.sp_BlitzWho') IS NULL
+		IF OBJECT_ID('master.dbo.sp_BlitzWho') IS NULL
 		BEGIN
 			PRINT N'sp_BlitzWho is not installed in the current database_files.  You can get a copy from http://FirstResponderKit.org'
 		END
@@ -586,7 +586,10 @@ BEGIN
 		       'SLEEP_SYSTEMTASK',
 		       'BROKER_TRANSMITTER',
 		       'REDO_THREAD_PENDING_WORK',
-		       'UCS_SESSION_REGISTRATION'
+		       'UCS_SESSION_REGISTRATION',
+			   'PREEMPTIVE_XE_DISPATCHER',
+			   'TRACEWRITE',
+			   'OLEDB'
 		   )
 		GROUP BY x.Pass, x.SampleTime, x.wait_type
 		ORDER BY sum_wait_time_ms DESC;
@@ -1054,7 +1057,10 @@ BEGIN
 		       'SLEEP_SYSTEMTASK',
 		       'BROKER_TRANSMITTER',
 		       'REDO_THREAD_PENDING_WORK',
-		       'UCS_SESSION_REGISTRATION'
+		       'UCS_SESSION_REGISTRATION',			   
+			   'PREEMPTIVE_XE_DISPATCHER',
+			   'TRACEWRITE',
+			   'OLEDB'
 		   )
 		GROUP BY x.Pass, x.SampleTime, x.wait_type
 		ORDER BY sum_wait_time_ms DESC;
@@ -2394,50 +2400,20 @@ BEGIN
 
 
             -------------------------
-            --What happened: #FileStats
+            --What happened: #QueryStats
             -------------------------
-            SELECT
-                [qsNow].[ID] AS [Now-ID],
-                [qsNow].[Pass] AS [Now-Pass],
-                [qsNow].[SampleTime] AS [Now-SampleTime],
-                [qsNow].[sql_handle] AS [Now-sql_handle],
-                [qsNow].[statement_start_offset] AS [Now-statement_start_offset],
-                [qsNow].[statement_end_offset] AS [Now-statement_end_offset],
-                [qsNow].[plan_generation_num] AS [Now-plan_generation_num],
-                [qsNow].[plan_handle] AS [Now-plan_handle],
-                [qsNow].[execution_count] AS [Now-execution_count],
-                [qsNow].[total_worker_time] AS [Now-total_worker_time],
-                [qsNow].[total_physical_reads] AS [Now-total_physical_reads],
-                [qsNow].[total_logical_writes] AS [Now-total_logical_writes],
-                [qsNow].[total_logical_reads] AS [Now-total_logical_reads],
-                [qsNow].[total_clr_time] AS [Now-total_clr_time],
-                [qsNow].[total_elapsed_time] AS [Now-total_elapsed_time],
-                [qsNow].[creation_time] AS [Now-creation_time],
-                [qsNow].[query_hash] AS [Now-query_hash],
-                [qsNow].[query_plan_hash] AS [Now-query_plan_hash],
-                [qsNow].[Points] AS [Now-Points],
-                [qsFirst].[ID] AS [First-ID],
-                [qsFirst].[Pass] AS [First-Pass],
-                [qsFirst].[SampleTime] AS [First-SampleTime],
-                [qsFirst].[sql_handle] AS [First-sql_handle],
-                [qsFirst].[statement_start_offset] AS [First-statement_start_offset],
-                [qsFirst].[statement_end_offset] AS [First-statement_end_offset],
-                [qsFirst].[plan_generation_num] AS [First-plan_generation_num],
-                [qsFirst].[plan_handle] AS [First-plan_handle],
-                [qsFirst].[execution_count] AS [First-execution_count],
-                [qsFirst].[total_worker_time] AS [First-total_worker_time],
-                [qsFirst].[total_physical_reads] AS [First-total_physical_reads],
-                [qsFirst].[total_logical_writes] AS [First-total_logical_writes],
-                [qsFirst].[total_logical_reads] AS [First-total_logical_reads],
-                [qsFirst].[total_clr_time] AS [First-total_clr_time],
-                [qsFirst].[total_elapsed_time] AS [First-total_elapsed_time],
-                [qsFirst].[creation_time] AS [First-creation_time],
-                [qsFirst].[query_hash] AS [First-query_hash],
-                [qsFirst].[query_plan_hash] AS [First-query_plan_hash],
-                [qsFirst].[Points] AS [First-Points]
+            IF @CheckProcedureCache = 1
+			BEGIN
+			
+			SELECT qsNow.*, qsFirst.*
             FROM #QueryStats qsNow
               INNER JOIN #QueryStats qsFirst ON qsNow.[sql_handle] = qsFirst.[sql_handle] AND qsNow.statement_start_offset = qsFirst.statement_start_offset AND qsNow.statement_end_offset = qsFirst.statement_end_offset AND qsNow.plan_generation_num = qsFirst.plan_generation_num AND qsNow.plan_handle = qsFirst.plan_handle AND qsFirst.Pass = 1
             WHERE qsNow.Pass = 2
+			END
+			ELSE
+			BEGIN
+			SELECT 'Plan Cache' AS [Pattern], 'Plan cache not analyzed' AS [Finding], 'Use @CheckProcedureCache = 1 or run sp_BlitzCache for more analysis' AS [More Info], CONVERT(XML, @StockDetailsHeader + 'firstresponderkit.org' + @StockDetailsFooter) AS [Details]
+			END
         END
 
     DROP TABLE #BlitzFirstResults;
@@ -2445,7 +2421,7 @@ BEGIN
     /* What's running right now? This is the first and last result set. */
     IF @SinceStartup = 0 AND @Seconds > 0 AND @ExpertMode = 1 
     BEGIN
-		IF OBJECT_ID('dbo.sp_BlitzWho') IS NOT NULL
+		IF OBJECT_ID('master.dbo.sp_BlitzWho') IS NOT NULL
 		BEGIN
 			EXEC [dbo].[sp_BlitzWho]
 		END
