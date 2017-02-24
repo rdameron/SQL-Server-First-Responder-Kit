@@ -30,7 +30,9 @@ WITH RECOMPILE
 AS
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-	SET @VersionDate = '20170201';
+	DECLARE @Version VARCHAR(30);
+	SET @Version = '5.0';
+	SET @VersionDate = '20170301';
 	SET @OutputType = UPPER(@OutputType);
 
 	IF @Help = 1 PRINT '
@@ -508,9 +510,10 @@ AS
             WHERE   name='tempdb';
 
 		/* Have they cleared wait stats? Using a 10% fudge factor */
-		IF @MsSinceWaitsCleared * .9 > (SELECT wait_time_ms FROM sys.dm_os_wait_stats WHERE wait_type = 'SQLTRACE_INCREMENTAL_FLUSH_SLEEP')
+		IF @MsSinceWaitsCleared * .9 > (SELECT MAX(wait_time_ms) FROM sys.dm_os_wait_stats WHERE wait_type IN ('SP_SERVER_DIAGNOSTICS_SLEEP', 'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP', 'REQUEST_FOR_DEADLOCK_SEARCH', 'HADR_FILESTREAM_IOMGR_IOCOMPLETION', 'LAZYWRITER_SLEEP', 'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', 'DIRTY_PAGE_POLL', 'LOGMGR_QUEUE'))
 			BEGIN
-				SET @MsSinceWaitsCleared = (SELECT wait_time_ms FROM sys.dm_os_wait_stats WHERE wait_type = 'SQLTRACE_INCREMENTAL_FLUSH_SLEEP')
+				SET @MsSinceWaitsCleared = (SELECT MAX(wait_time_ms) FROM sys.dm_os_wait_stats WHERE wait_type IN ('SP_SERVER_DIAGNOSTICS_SLEEP', 'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP', 'REQUEST_FOR_DEADLOCK_SEARCH', 'HADR_FILESTREAM_IOMGR_IOCOMPLETION', 'LAZYWRITER_SLEEP', 'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', 'DIRTY_PAGE_POLL', 'LOGMGR_QUEUE'));
+				IF @MsSinceWaitsCleared = 0 SET @MsSinceWaitsCleared = 1;
 				INSERT  INTO #BlitzResults
 						( CheckID ,
 							Priority ,
@@ -1725,6 +1728,7 @@ AS
 					BEGIN
 						INSERT  INTO #BlitzResults
 								( CheckID ,
+								  DatabaseName ,
 								  Priority ,
 								  FindingsGroup ,
 								  Finding ,
@@ -1732,6 +1736,7 @@ AS
 								  Details
 								)
 								SELECT  28 AS CheckID ,
+								        'msdb' AS DatabaseName ,
 										200 AS Priority ,
 										'Informational' AS FindingsGroup ,
 										'Tables in the MSDB Database' AS Finding ,
@@ -1751,6 +1756,7 @@ AS
 					BEGIN
 						INSERT  INTO #BlitzResults
 								( CheckID ,
+								  DatabaseName ,
 								  Priority ,
 								  FindingsGroup ,
 								  Finding ,
@@ -1758,6 +1764,7 @@ AS
 								  Details
 								)
 								SELECT  29 AS CheckID ,
+								        'msdb' AS DatabaseName ,
 										200 AS Priority ,
 										'Informational' AS FindingsGroup ,
 										'Tables in the Model Database' AS Finding ,
@@ -3120,7 +3127,7 @@ AS
 	                        END
 
 
-                        /* Performance - Log File Growths Slow */
+                        /* Performance - File Growths Slow */
                         IF NOT EXISTS ( SELECT  1
 				                        FROM    #SkipChecks
 				                        WHERE   DatabaseName IS NULL AND CheckID = 151 )
@@ -3139,11 +3146,11 @@ AS
 					                            t.DatabaseName,
 						                        50 AS Priority ,
 						                        'Performance' AS FindingsGroup ,
-						                        'Log File Growths Slow' AS Finding ,
+						                        'File Growths Slow' AS Finding ,
 						                        'https://BrentOzar.com/go/filegrowth' AS URL ,
-						                        CAST(COUNT(*) AS NVARCHAR(100)) + ' growths took more than 15 seconds each. Consider setting log file autogrowth to a smaller increment.' AS Details
+						                        CAST(COUNT(*) AS NVARCHAR(100)) + ' growths took more than 15 seconds each. Consider setting file autogrowth to a smaller increment.' AS Details
                                         FROM    sys.fn_trace_gettable(@TracePath, DEFAULT) t
-                                        WHERE t.EventClass = 93
+                                        WHERE t.EventClass IN (92, 93)
                                           AND t.StartTime > DATEADD(dd, -30, GETDATE())
                                           AND t.Duration > 15000000
                                         GROUP BY t.DatabaseName
@@ -3571,7 +3578,7 @@ IF @ProductVersionMajor >= 10
 																	 ELSE CAST([current_size_in_kb] / 1024. AS VARCHAR(100))
 																		  + ' MB'
 								END +
-								'. Did you know that BPEs only provide single threaded access 8 bytes at a time?'	
+								'. Did you know that BPEs only provide single threaded access 8KB (one page) at a time?'	
 							   ) AS [Details]
 							 FROM sys.dm_os_buffer_pool_extension_configuration
 							 WHERE [state_description] <> 'BUFFER POOL EXTENSION DISABLED'

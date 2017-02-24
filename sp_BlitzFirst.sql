@@ -29,7 +29,10 @@ AS
 BEGIN
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-SET @VersionDate = '20170201'
+DECLARE @Version VARCHAR(30);
+SET @Version = '5.0';
+SET @VersionDate = '20170301';
+
 
 IF @Help = 1 PRINT '
 sp_BlitzFirst from http://FirstResponderKit.org
@@ -100,7 +103,8 @@ DECLARE @StringToExecute NVARCHAR(MAX),
     @OutputTableNameFileStats_View NVARCHAR(256),
     @OutputTableNamePerfmonStats_View NVARCHAR(256),
     @OutputTableNameWaitStats_View NVARCHAR(256),
-    @ObjectFullName NVARCHAR(2000);
+    @ObjectFullName NVARCHAR(2000),
+	@BlitzWho NVARCHAR(MAX) = N'EXEC dbo.sp_BlitzWho @ShowSleepingSPIDs = ' + CONVERT(NVARCHAR(1), @ShowSleepingSPIDs) + N';';
 
 /* Sanitize our inputs */
 SELECT
@@ -167,13 +171,12 @@ BEGIN
     /* What's running right now? This is the first and last result set. */
     IF @SinceStartup = 0 AND @Seconds > 0 AND @ExpertMode = 1 
     BEGIN
-		IF OBJECT_ID('master.dbo.sp_BlitzWho') IS NULL
+		IF OBJECT_ID('master.dbo.sp_BlitzWho') IS NULL AND OBJECT_ID('dbo.sp_BlitzWho') IS NULL
 		BEGIN
 			PRINT N'sp_BlitzWho is not installed in the current database_files.  You can get a copy from http://FirstResponderKit.org'
 		END
 		ELSE
 		BEGIN
-		    DECLARE @BlitzWho NVARCHAR(MAX) = 'EXEC [dbo].[sp_BlitzWho] @ShowSleepingSPIDs = ' + CONVERT(NVARCHAR(1), @ShowSleepingSPIDs)
 			EXEC (@BlitzWho)
 		END
     END /* IF @SinceStartup = 0 AND @Seconds > 0 AND @ExpertMode = 1   -   What's running right now? This is the first and last result set. */
@@ -639,7 +642,8 @@ BEGIN
         'Maintenance Tasks Running' AS FindingGroup,
         'Backup Running' AS Finding,
         'http://www.BrentOzar.com/askbrent/backups/' AS URL,
-        'Backup of ' + DB_NAME(db.resource_database_id) + ' database (' + (SELECT CAST(CAST(SUM(size * 8.0 / 1024 / 1024) AS BIGINT) AS NVARCHAR) FROM #MasterFiles WHERE database_id = db.resource_database_id) + 'GB) is ' + CAST(r.percent_complete AS NVARCHAR(100)) + '% complete, has been running since ' + CAST(r.start_time AS NVARCHAR(100)) + '. ' AS Details,
+        'Backup of ' + DB_NAME(db.resource_database_id) + ' database (' + (SELECT CAST(CAST(SUM(size * 8.0 / 1024 / 1024) AS BIGINT) AS NVARCHAR) FROM #MasterFiles WHERE database_id = db.resource_database_id) + 'GB) is ' + CAST(r.percent_complete AS NVARCHAR(100)) + '% complete, has been running since ' + CAST(r.start_time AS NVARCHAR(100)) + '. ' 
+		   + CASE WHEN COALESCE(s.nt_user_name, s.login_name) IS NOT NULL THEN (' Login: ' + COALESCE(s.nt_user_name, s.login_name) + ' ') ELSE '' END AS Details,
         'KILL ' + CAST(r.session_id AS NVARCHAR(100)) + ';' AS HowToStopIt,
         pl.query_plan AS QueryPlan,
         r.start_time AS StartTime,
@@ -661,8 +665,8 @@ BEGIN
     AND     request_status = N'GRANT'
     AND     request_owner_type = N'SHARED_TRANSACTION_WORKSPACE') AS db ON s.session_id = db.request_session_id
     CROSS APPLY sys.dm_exec_query_plan(r.plan_handle) pl
-    WHERE r.command LIKE 'BACKUP%';
-
+    WHERE r.command LIKE 'BACKUP%'
+	AND r.start_time <= DATEADD(minute, -5, GETDATE());
 
     /* If there's a backup running, add details explaining how long full backup has been taking in the last month. */
     IF @Seconds > 0 AND CAST(SERVERPROPERTY('edition') AS VARCHAR(100)) <> 'SQL Azure'
@@ -1325,7 +1329,7 @@ BEGIN
     SELECT TOP 10 6 AS CheckID,
         200 AS Priority,
         'Wait Stats' AS FindingGroup,
-        wNow.wait_type AS Finding,
+        wNow.wait_type AS Finding, /* IF YOU CHANGE THIS, STUFF WILL BREAK. Other checks look for wait type names in the Finding field. See checks 11, 12 as example. */
         N'http://www.brentozar.com/sql/wait-stats/#' + wNow.wait_type AS URL,
         'For ' + CAST(((wNow.wait_time_ms - COALESCE(wBase.wait_time_ms,0)) / 1000) AS NVARCHAR(100)) + ' seconds over the last ' + CASE @Seconds WHEN 0 THEN (CAST(DATEDIFF(dd,@StartSampleTime,@FinishSampleTime) AS NVARCHAR(10)) + ' days') ELSE (CAST(@Seconds AS NVARCHAR(10)) + ' seconds') END + ', SQL Server was waiting on this particular bottleneck.' + @LineFeed + @LineFeed AS Details,
         'See the URL for more details on how to mitigate this wait type.' AS HowToStopIt,
@@ -1336,46 +1340,54 @@ BEGIN
     ORDER BY (wNow.wait_time_ms - COALESCE(wBase.wait_time_ms,0)) DESC;
 
     /* Server Performance - Slow Data File Reads - CheckID 11 */
-    INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, DatabaseID, DatabaseName)
-    SELECT TOP 10 11 AS CheckID,
-        50 AS Priority,
-        'Server Performance' AS FindingGroup,
-        'Slow Data File Reads' AS Finding,
-        'http://www.BrentOzar.com/go/slow/' AS URL,
-        'File: ' + fNow.PhysicalName + @LineFeed
-            + 'Number of reads during the sample: ' + CAST((fNow.num_of_reads - fBase.num_of_reads) AS NVARCHAR(20)) + @LineFeed
-            + 'Seconds spent waiting on storage for these reads: ' + CAST(((fNow.io_stall_read_ms - fBase.io_stall_read_ms) / 1000.0) AS NVARCHAR(20)) + @LineFeed
-            + 'Average read latency during the sample: ' + CAST(((fNow.io_stall_read_ms - fBase.io_stall_read_ms) / (fNow.num_of_reads - fBase.num_of_reads) ) AS NVARCHAR(20)) + ' milliseconds' + @LineFeed
-            + 'Microsoft guidance for data file read speed: 20ms or less.' + @LineFeed + @LineFeed AS Details,
-        'See the URL for more details on how to mitigate this wait type.' AS HowToStopIt,
-        fNow.DatabaseID,
-        fNow.DatabaseName
-    FROM #FileStats fNow
-    INNER JOIN #FileStats fBase ON fNow.DatabaseID = fBase.DatabaseID AND fNow.FileID = fBase.FileID AND fNow.SampleTime > fBase.SampleTime AND fNow.num_of_reads > fBase.num_of_reads AND fNow.io_stall_read_ms > (fBase.io_stall_read_ms + 1000)
-    WHERE (fNow.io_stall_read_ms - fBase.io_stall_read_ms) / (fNow.num_of_reads - fBase.num_of_reads) >= @FileLatencyThresholdMS
-        AND fNow.TypeDesc = 'ROWS'
-    ORDER BY (fNow.io_stall_read_ms - fBase.io_stall_read_ms) / (fNow.num_of_reads - fBase.num_of_reads) DESC;
+	IF EXISTS (SELECT * FROM #BlitzFirstResults WHERE Finding LIKE 'PAGEIOLATCH%')
+	BEGIN
+		INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, DatabaseID, DatabaseName)
+		SELECT TOP 10 11 AS CheckID,
+			50 AS Priority,
+			'Server Performance' AS FindingGroup,
+			'Slow Data File Reads' AS Finding,
+			'http://www.BrentOzar.com/go/slow/' AS URL,
+			'Your server is experiencing PAGEIOLATCH% waits due to slow data file reads. This file is one of the reasons why.' + @LineFeed
+				+ 'File: ' + fNow.PhysicalName + @LineFeed
+				+ 'Number of reads during the sample: ' + CAST((fNow.num_of_reads - fBase.num_of_reads) AS NVARCHAR(20)) + @LineFeed
+				+ 'Seconds spent waiting on storage for these reads: ' + CAST(((fNow.io_stall_read_ms - fBase.io_stall_read_ms) / 1000.0) AS NVARCHAR(20)) + @LineFeed
+				+ 'Average read latency during the sample: ' + CAST(((fNow.io_stall_read_ms - fBase.io_stall_read_ms) / (fNow.num_of_reads - fBase.num_of_reads) ) AS NVARCHAR(20)) + ' milliseconds' + @LineFeed
+				+ 'Microsoft guidance for data file read speed: 20ms or less.' + @LineFeed + @LineFeed AS Details,
+			'See the URL for more details on how to mitigate this wait type.' AS HowToStopIt,
+			fNow.DatabaseID,
+			fNow.DatabaseName
+		FROM #FileStats fNow
+		INNER JOIN #FileStats fBase ON fNow.DatabaseID = fBase.DatabaseID AND fNow.FileID = fBase.FileID AND fNow.SampleTime > fBase.SampleTime AND fNow.num_of_reads > fBase.num_of_reads AND fNow.io_stall_read_ms > (fBase.io_stall_read_ms + 1000)
+		WHERE (fNow.io_stall_read_ms - fBase.io_stall_read_ms) / (fNow.num_of_reads - fBase.num_of_reads) >= @FileLatencyThresholdMS
+			AND fNow.TypeDesc = 'ROWS'
+		ORDER BY (fNow.io_stall_read_ms - fBase.io_stall_read_ms) / (fNow.num_of_reads - fBase.num_of_reads) DESC;
+	END	
 
     /* Server Performance - Slow Log File Writes - CheckID 12 */
-    INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, DatabaseID, DatabaseName)
-    SELECT TOP 10 12 AS CheckID,
-        50 AS Priority,
-        'Server Performance' AS FindingGroup,
-        'Slow Log File Writes' AS Finding,
-        'http://www.BrentOzar.com/go/slow/' AS URL,
-        'File: ' + fNow.PhysicalName + @LineFeed
-            + 'Number of writes during the sample: ' + CAST((fNow.num_of_writes - fBase.num_of_writes) AS NVARCHAR(20)) + @LineFeed
-            + 'Seconds spent waiting on storage for these writes: ' + CAST(((fNow.io_stall_write_ms - fBase.io_stall_write_ms) / 1000.0) AS NVARCHAR(20)) + @LineFeed
-            + 'Average write latency during the sample: ' + CAST(((fNow.io_stall_write_ms - fBase.io_stall_write_ms) / (fNow.num_of_writes - fBase.num_of_writes) ) AS NVARCHAR(20)) + ' milliseconds' + @LineFeed
-            + 'Microsoft guidance for log file write speed: 3ms or less.' + @LineFeed + @LineFeed AS Details,
-        'See the URL for more details on how to mitigate this wait type.' AS HowToStopIt,
-        fNow.DatabaseID,
-        fNow.DatabaseName
-    FROM #FileStats fNow
-    INNER JOIN #FileStats fBase ON fNow.DatabaseID = fBase.DatabaseID AND fNow.FileID = fBase.FileID AND fNow.SampleTime > fBase.SampleTime AND fNow.num_of_writes > fBase.num_of_writes AND fNow.io_stall_write_ms > (fBase.io_stall_write_ms + 1000)
-    WHERE (fNow.io_stall_write_ms - fBase.io_stall_write_ms) / (fNow.num_of_writes - fBase.num_of_writes) >= @FileLatencyThresholdMS
-        AND fNow.TypeDesc = 'LOG'
-    ORDER BY (fNow.io_stall_write_ms - fBase.io_stall_write_ms) / (fNow.num_of_writes - fBase.num_of_writes) DESC;
+	IF EXISTS (SELECT * FROM #BlitzFirstResults WHERE Finding LIKE 'WRITELOG%')
+	BEGIN
+		INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, DatabaseID, DatabaseName)
+		SELECT TOP 10 12 AS CheckID,
+			50 AS Priority,
+			'Server Performance' AS FindingGroup,
+			'Slow Log File Writes' AS Finding,
+			'http://www.BrentOzar.com/go/slow/' AS URL,
+			'Your server is experiencing WRITELOG waits due to slow log file writes. This file is one of the reasons why.' + @LineFeed
+				+ 'File: ' + fNow.PhysicalName + @LineFeed
+				+ 'Number of writes during the sample: ' + CAST((fNow.num_of_writes - fBase.num_of_writes) AS NVARCHAR(20)) + @LineFeed
+				+ 'Seconds spent waiting on storage for these writes: ' + CAST(((fNow.io_stall_write_ms - fBase.io_stall_write_ms) / 1000.0) AS NVARCHAR(20)) + @LineFeed
+				+ 'Average write latency during the sample: ' + CAST(((fNow.io_stall_write_ms - fBase.io_stall_write_ms) / (fNow.num_of_writes - fBase.num_of_writes) ) AS NVARCHAR(20)) + ' milliseconds' + @LineFeed
+				+ 'Microsoft guidance for log file write speed: 3ms or less.' + @LineFeed + @LineFeed AS Details,
+			'See the URL for more details on how to mitigate this wait type.' AS HowToStopIt,
+			fNow.DatabaseID,
+			fNow.DatabaseName
+		FROM #FileStats fNow
+		INNER JOIN #FileStats fBase ON fNow.DatabaseID = fBase.DatabaseID AND fNow.FileID = fBase.FileID AND fNow.SampleTime > fBase.SampleTime AND fNow.num_of_writes > fBase.num_of_writes AND fNow.io_stall_write_ms > (fBase.io_stall_write_ms + 1000)
+		WHERE (fNow.io_stall_write_ms - fBase.io_stall_write_ms) / (fNow.num_of_writes - fBase.num_of_writes) >= @FileLatencyThresholdMS
+			AND fNow.TypeDesc = 'LOG'
+		ORDER BY (fNow.io_stall_write_ms - fBase.io_stall_write_ms) / (fNow.num_of_writes - fBase.num_of_writes) DESC;
+	END
 
 
     /* SQL Server Internal Maintenance - Log File Growing - CheckID 13 */
@@ -2420,10 +2432,15 @@ BEGIN
 
     /* What's running right now? This is the first and last result set. */
     IF @SinceStartup = 0 AND @Seconds > 0 AND @ExpertMode = 1 
+IF @SinceStartup = 0 AND @Seconds > 0 AND @ExpertMode = 1 
     BEGIN
-		IF OBJECT_ID('master.dbo.sp_BlitzWho') IS NOT NULL
+		IF OBJECT_ID('master.dbo.sp_BlitzWho') IS NULL AND OBJECT_ID('dbo.sp_BlitzWho') IS NULL
 		BEGIN
-			EXEC [dbo].[sp_BlitzWho]
+			PRINT N'sp_BlitzWho is not installed in the current database_files.  You can get a copy from http://FirstResponderKit.org'
+		END
+		ELSE
+		BEGIN
+			EXEC (@BlitzWho)
 		END
     END /* IF @SinceStartup = 0 AND @Seconds > 0 AND @ExpertMode = 1   -   What's running right now? This is the first and last result set. */
 
