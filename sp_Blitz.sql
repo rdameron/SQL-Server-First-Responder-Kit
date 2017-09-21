@@ -32,8 +32,8 @@ AS
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 	DECLARE @Version VARCHAR(30);
-	SET @Version = '5.6';
-	SET @VersionDate = '20170801';
+	SET @Version = '5.7';
+	SET @VersionDate = '20170901';
 	SET @OutputType = UPPER(@OutputType);
 
 	IF @Help = 1 PRINT '
@@ -145,7 +145,9 @@ AS
 			,@MinServerMemory bigint
 			,@MaxServerMemory bigint
 			,@ColumnStoreIndexesInUse bit
-			,@TraceFileIssue bit;
+			,@TraceFileIssue bit
+			-- Flag for Windows OS to help with Linux support
+			,@IsWindowsOperatingSystem BIT;
 
 
 		SET @crlf = NCHAR(13) + NCHAR(10);
@@ -235,11 +237,35 @@ AS
 							WHERE   DatabaseName IS NULL AND CheckID = 106 )
 							AND (select convert(int,value_in_use) from sys.configurations where name = 'default trace enabled' ) = 1
 			BEGIN
+				-- Flag for Windows OS to help with Linux support
+				IF EXISTS ( SELECT  1
+								FROM    sys.all_objects
+								WHERE   name = 'dm_os_host_info' )
+					BEGIN
+						SELECT @IsWindowsOperatingSystem = CASE WHEN host_platform = 'Windows' THEN 1 ELSE 0 END FROM sys.dm_os_host_info ;
+					END;
+					ELSE
+					BEGIN
+						SELECT @IsWindowsOperatingSystem = 1 ;
+					END;
+
 					select @curr_tracefilename = [path] from sys.traces where is_default = 1 ;
 					set @curr_tracefilename = reverse(@curr_tracefilename);
-					select @indx = patindex('%\%', @curr_tracefilename) ;
-					set @curr_tracefilename = reverse(@curr_tracefilename) ;
-					set @base_tracefilename = left( @curr_tracefilename,len(@curr_tracefilename) - @indx) + '\log.trc' ;
+
+					-- Set the trace file path separator based on underlying OS
+					IF (@IsWindowsOperatingSystem = 1)
+					BEGIN
+						select @indx = patindex('%\%', @curr_tracefilename) ;
+						set @curr_tracefilename = reverse(@curr_tracefilename) ;
+						set @base_tracefilename = left( @curr_tracefilename,len(@curr_tracefilename) - @indx) + '\log.trc' ;
+					END;
+					ELSE
+					BEGIN
+						select @indx = patindex('%/%', @curr_tracefilename) ;
+						set @curr_tracefilename = reverse(@curr_tracefilename) ;
+						set @base_tracefilename = left( @curr_tracefilename,len(@curr_tracefilename) - @indx) + '/log.trc' ;
+					END;
+
 			END;
 
 		/* If the server has any databases on Antiques Roadshow, skip the checks that would break due to CTEs. */
@@ -250,6 +276,20 @@ AS
 			PRINT 'The database-level checks rely on CTEs, which are not supported in SQL 2000 compat level databases.';
 			PRINT 'Get with the cool kids and switch to a current compatibility level, Grandpa. To find the problems, run:';
 			PRINT 'SELECT * FROM sys.databases WHERE compatibility_level < 90;';
+			INSERT  INTO #BlitzResults
+			( CheckID ,
+				Priority ,
+				FindingsGroup ,
+				Finding ,
+				URL ,
+				Details
+			)
+			SELECT 201 AS CheckID ,
+					0 AS Priority ,
+					'Informational' AS FindingsGroup ,
+					'@CheckUserDatabaseObjects Disabled' AS Finding ,
+					'https://www.BrentOzar.com/blitz/' AS URL ,
+					'Since you have databases with compatibility_level < 90, we can''t run @CheckUserDatabaseObjects = 1. To find them: SELECT * FROM sys.databases WHERE compatibility_level < 90' AS Details;
 		END;
 
 
@@ -584,6 +624,20 @@ AS
 			SET @CheckUserDatabaseObjects = 0;
 			PRINT 'Running sp_Blitz @CheckUserDatabaseObjects = 1 on a server with 50+ databases may cause temporary insanity for the server and/or user.';
 			PRINT 'If you''re sure you want to do this, run again with the parameter @BringThePain = 1.';
+			INSERT  INTO #BlitzResults
+			( CheckID ,
+				Priority ,
+				FindingsGroup ,
+				Finding ,
+				URL ,
+				Details
+			)
+			SELECT 201 AS CheckID ,
+					0 AS Priority ,
+					'Informational' AS FindingsGroup ,
+					'@CheckUserDatabaseObjects Disabled' AS Finding ,
+					'https://www.BrentOzar.com/blitz/' AS URL ,
+					'If you want to check 50+ databases, you have to also use @BringThePain = 1.' AS Details;
 			END;
 
 		/* Sanitize our inputs */
@@ -845,6 +899,36 @@ AS
 								''The certificate '' + c.name + '' is used to encrypt database '' + db_name(dek.database_id) + ''. Last backup date: '' + COALESCE(CAST(c.pvt_key_last_backup_date AS VARCHAR(100)), ''Never'') AS Details
 								FROM sys.certificates c INNER JOIN sys.dm_database_encryption_keys dek ON c.thumbprint = dek.encryptor_thumbprint
 								WHERE pvt_key_last_backup_date IS NULL OR pvt_key_last_backup_date <= DATEADD(dd, -30, GETDATE())  OPTION (RECOMPILE);';
+							
+							IF @Debug = 2 AND @StringToExecute IS NOT NULL PRINT @StringToExecute;
+							IF @Debug = 2 AND @StringToExecute IS NULL PRINT '@StringToExecute has gone NULL, for some reason.';
+							
+							EXECUTE(@StringToExecute);
+						END;
+
+                     IF NOT EXISTS ( SELECT  1
+									FROM    #SkipChecks
+									WHERE   DatabaseName IS NULL AND CheckID = 202 )
+						AND EXISTS ( SELECT *
+									 FROM   sys.all_columns c
+									 WHERE  c.name = 'pvt_key_last_backup_date' )
+						AND EXISTS ( SELECT *
+									 FROM   msdb.INFORMATION_SCHEMA.COLUMNS c
+									 WHERE  c.TABLE_NAME = 'backupset' AND c.COLUMN_NAME = 'encryptor_thumbprint' )
+						BEGIN
+
+							IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 202) WITH NOWAIT;
+
+							SET @StringToExecute = 'INSERT INTO #BlitzResults (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+								SELECT DISTINCT 202 AS CheckID,
+								1 AS Priority,
+								''Backup'' AS FindingsGroup,
+								''Encryption Certificate Not Backed Up Recently'' AS Finding,
+								''https://BrentOzar.com/go/tde'' AS URL,
+								''The certificate '' + c.name + '' is used to encrypt database backups. Last backup date: '' + COALESCE(CAST(c.pvt_key_last_backup_date AS VARCHAR(100)), ''Never'') AS Details
+								FROM sys.certificates c
+                                INNER JOIN msdb.dbo.backupset bs ON c.thumbprint = bs.encryptor_thumbprint
+                                WHERE pvt_key_last_backup_date IS NULL OR pvt_key_last_backup_date <= DATEADD(dd, -30, GETDATE()) OPTION (RECOMPILE);';
 							
 							IF @Debug = 2 AND @StringToExecute IS NOT NULL PRINT @StringToExecute;
 							IF @Debug = 2 AND @StringToExecute IS NULL PRINT '@StringToExecute has gone NULL, for some reason.';
@@ -4524,13 +4608,34 @@ IF @ProductVersionMajor >= 10
 					'. This does not include CHECKDB and other usually benign DBCC events.'
 					AS Details
 			FROM    #dbcc_events_from_trace d
-			WHERE d.[dbcc_event_trunc_upper] NOT IN (
-			N'DBCC CHECKDB', N' DBCC CHECKALLOC' , N'DBCC CHECKTABLE', N'DBCC CHECKCATALOG', N'DBCC CHECKFILEGROUP', --CHECKDB related
-			N'DBCC TRACEON', N'DBCC TRACEOFF', N'DBCC DBINFO', N'DBCC LOGINFO', N'DBCC INPUTBUFFER', N'DBCC TRACESTATUS', --Usually monitoring tool related
-			N'DBCC CHECKIDENT', N'DBCC SHOW_STATISTICS', N'DBCC CHECKCONSTRAINTS',  --Probably rational
-			N'DBCC CLEANTABLE', N'DBCC CHECKPRIMARYFILE', N'DBCC OPENTRAN', 'DBCC SHOWFILESTATS' --Weird but okay
-													)
-			AND d.dbcc_event_full_upper NOT IN('DBCC SQLPERF(NETSTATS)', 'DBCC SQLPERF(LOGSPACE)')
+			/* This WHERE clause below looks horrible, but it's because users can run stuff like
+			   DBCC     LOGINFO
+			   with lots of spaces (or carriage returns, or comments) in between the DBCC and the
+			   command they're trying to run. See Github issues 1062, 1074, 1075.
+			*/
+			WHERE d.dbcc_event_full_upper NOT LIKE '%DBCC%ADDINSTANCE%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKALLOC%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKCATALOG%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKCONSTRAINTS%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKFILEGROUP%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKIDENT%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKPRIMARYFILE%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKTABLE%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CLEANTABLE%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%DBINFO%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%ERRORLOG%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%INCREMENTINSTANCE%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%INPUTBUFFER%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%LOGINFO%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%OPENTRAN%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%SETINSTANCE%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%SHOWFILESTATS%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%SHOW_STATISTICS%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%SQLPERF%NETSTATS%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%SQLPERF%LOGSPACE%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%TRACEON%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%TRACEOFF%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%TRACESTATUS%'
 			AND d.application_name NOT LIKE 'Critical Care(R) Collector'
 			AND d.application_name NOT LIKE '%Red Gate Software Ltd SQL Prompt%'
 			AND d.application_name NOT LIKE '%Spotlight Diagnostic Server%'
@@ -5669,6 +5774,8 @@ IF @ProductVersionMajor >= 10
 
 				IF @CheckProcedureCache = 1
 					
+					BEGIN
+
 					IF @Debug IN (1, 2) RAISERROR('Begin checking procedure cache', 0, 1) WITH NOWAIT;
 					
 					BEGIN
@@ -6060,6 +6167,7 @@ IF @ProductVersionMajor >= 10
 							END;
 
 					END; /* IF @CheckProcedureCache = 1 */
+				END;
 									  
 		/*Check to see if the HA endpoint account is set at the same as the SQL Server Service Account*/
 		IF @ProductVersionMajor >= 10
@@ -6523,12 +6631,12 @@ IF @ProductVersionMajor >= 10
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 172 )
 					BEGIN
-					IF EXISTS ( SELECT  1
-											FROM    sys.all_objects
-											WHERE   name = 'dm_os_windows_info' )
-
+					-- sys.dm_os_host_info includes both Windows and Linux info
+					IF EXISTS (SELECT 1
+									FROM	sys.all_objects
+									WHERE	name = 'dm_os_host_info' )
 					BEGIN
-						  
+
 						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 172) WITH NOWAIT;
 						  
 						  INSERT    INTO [#BlitzResults]
@@ -6543,21 +6651,65 @@ IF @ProductVersionMajor >= 10
 							172 AS [CheckID] ,
 							250 AS [Priority] ,
 							'Server Info' AS [FindingsGroup] ,
-							'Windows Version' AS [Finding] ,
-							'https://en.wikipedia.org/wiki/List_of_Microsoft_Windows_versions' AS [URL] ,
+							'Operating System Version' AS [Finding] ,
+							( CASE WHEN @IsWindowsOperatingSystem = 1
+								THEN 'https://en.wikipedia.org/wiki/List_of_Microsoft_Windows_versions'
+								ELSE 'https://en.wikipedia.org/wiki/List_of_Linux_distributions'
+								END
+							) AS [URL] ,
 							( CASE 
-								WHEN [owi].[windows_release] = '5' THEN 'You''re running a really old version: Windows 2000, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
-								WHEN [owi].[windows_release] > '5' AND [owi].[windows_release] < '6' THEN 'You''re running a really old version: Windows Server 2003/2003R2 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
-								WHEN [owi].[windows_release] >= '6' AND [owi].[windows_release] <= '6.1' THEN 'You''re running a pretty old version: Windows: Server 2008/2008R2 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
-								WHEN [owi].[windows_release] = '6.2' THEN 'You''re running a rather modern version of Windows: Server 2012 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
-								WHEN [owi].[windows_release] = '6.3' THEN 'You''re running a pretty modern version of Windows: Server 2012R2 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
-								WHEN [owi].[windows_release] > '6.3' THEN 'Hot dog! You''re living in the future! You''re running version ' + CAST([owi].[windows_release] AS VARCHAR(5))
-								ELSE 'I have no idea which version of Windows you''re on. Sorry.'
+								WHEN [ohi].[host_platform] = 'Linux' THEN 'You''re running the ' + CAST([ohi].[host_distribution] AS VARCHAR(35)) + ' distribution of ' + CAST([ohi].[host_platform] AS VARCHAR(35)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
+								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] = '5' THEN 'You''re running a really old version: Windows 2000, version ' + CAST([ohi].[host_release] AS VARCHAR(5))
+								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] > '5' AND [ohi].[host_release] < '6' THEN 'You''re running a really old version: ' + CAST([ohi].[host_distribution] AS VARCHAR(50)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
+								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] >= '6' AND [ohi].[host_release] <= '6.1' THEN 'You''re running a pretty old version: Windows: ' + CAST([ohi].[host_distribution] AS VARCHAR(50)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
+								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] = '6.2' THEN 'You''re running a rather modern version of Windows: ' + CAST([ohi].[host_distribution] AS VARCHAR(50)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
+								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] = '6.3' THEN 'You''re running a pretty modern version of Windows: ' + CAST([ohi].[host_distribution] AS VARCHAR(50)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
+								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] > '6.3' THEN 'Hot dog! You''re living in the future! You''re running ' + CAST([ohi].[host_distribution] AS VARCHAR(50)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
+								ELSE 'You''re running ' + CAST([ohi].[host_distribution] AS VARCHAR(35)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
 								END
 							   ) AS [Details]
-							 FROM [sys].[dm_os_windows_info] [owi];
-
+							 FROM [sys].[dm_os_host_info] [ohi];
 					END;
+					ELSE
+					BEGIN
+					-- Otherwise, stick with Windows-only detection
+
+						IF EXISTS ( SELECT  1
+												FROM    sys.all_objects
+												WHERE   name = 'dm_os_windows_info' )
+
+							BEGIN
+						  
+								  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 172) WITH NOWAIT;
+						  
+								  INSERT    INTO [#BlitzResults]
+											( [CheckID] ,
+											  [Priority] ,
+											  [FindingsGroup] ,
+											  [Finding] ,
+											  [URL] ,
+											  [Details] )
+
+									SELECT
+									172 AS [CheckID] ,
+									250 AS [Priority] ,
+									'Server Info' AS [FindingsGroup] ,
+									'Windows Version' AS [Finding] ,
+									'https://en.wikipedia.org/wiki/List_of_Microsoft_Windows_versions' AS [URL] ,
+									( CASE 
+										WHEN [owi].[windows_release] = '5' THEN 'You''re running a really old version: Windows 2000, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
+										WHEN [owi].[windows_release] > '5' AND [owi].[windows_release] < '6' THEN 'You''re running a really old version: Windows Server 2003/2003R2 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
+										WHEN [owi].[windows_release] >= '6' AND [owi].[windows_release] <= '6.1' THEN 'You''re running a pretty old version: Windows: Server 2008/2008R2 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
+										WHEN [owi].[windows_release] = '6.2' THEN 'You''re running a rather modern version of Windows: Server 2012 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
+										WHEN [owi].[windows_release] = '6.3' THEN 'You''re running a pretty modern version of Windows: Server 2012R2 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
+										WHEN [owi].[windows_release] > '6.3' THEN 'Hot dog! You''re living in the future! You''re running version ' + CAST([owi].[windows_release] AS VARCHAR(5))
+										ELSE 'I have no idea which version of Windows you''re on. Sorry.'
+										END
+									   ) AS [Details]
+									 FROM [sys].[dm_os_windows_info] [owi];
+
+							END;
+						END;
 					END;
 
 /*
@@ -6730,13 +6882,15 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 										
 										IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 83) WITH NOWAIT;
 										
+				-- DATETIMEOFFSET and DATETIME have different minimum values, so there's
+				-- a small workaround here to force 1753-01-01 if the minimum is detected
 										SET @StringToExecute = 'INSERT INTO #BlitzResults (CheckID, Priority, FindingsGroup, Finding, URL, Details)
 				SELECT  83 AS CheckID ,
 				250 AS Priority ,
 				''Server Info'' AS FindingsGroup ,
 				''Services'' AS Finding ,
 				'''' AS URL ,
-				N''Service: '' + servicename + N'' runs under service account '' + service_account + N''. Last startup time: '' + COALESCE(CAST(CAST(last_startup_time AS DATETIME) AS VARCHAR(50)), ''not shown.'') + ''. Startup type: '' + startup_type_desc + N'', currently '' + status_desc + ''.''
+				N''Service: '' + servicename + N'' runs under service account '' + service_account + N''. Last startup time: '' + COALESCE(CAST(CASE WHEN YEAR(last_startup_time) <= 1753 THEN CAST(''17530101'' as datetime) ELSE CAST(last_startup_time AS DATETIME) END AS VARCHAR(50)), ''not shown.'') + ''. Startup type: '' + startup_type_desc + N'', currently '' + status_desc + ''.''
 				FROM sys.dm_server_services OPTION (RECOMPILE);';
 										
 										IF @Debug = 2 AND @StringToExecute IS NOT NULL PRINT @StringToExecute;

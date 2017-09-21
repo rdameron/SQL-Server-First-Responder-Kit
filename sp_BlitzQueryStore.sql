@@ -54,8 +54,8 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE @Version NVARCHAR(30);
-SET @Version = N'1.6';
-SET @VersionDate = N'20170801';
+	SET @Version = '1.7';
+	SET @VersionDate = '20170901';
 
 DECLARE /*Variables for the variable Gods*/
 		@msg NVARCHAR(MAX) = N'', --Used to format RAISERROR messages in some places
@@ -609,6 +609,7 @@ CREATE TABLE #working_warnings
 	is_bad_estimate BIT, 
 	is_big_log BIT,
 	is_big_tempdb BIT,
+	is_paul_white_electric BIT,
     warnings NVARCHAR(4000)
 	INDEX ww_ix_ids CLUSTERED (plan_id, query_id, query_hash, sql_handle)
 );
@@ -705,6 +706,16 @@ CREATE TABLE #plan_cost
 	query_plan_cost DECIMAL(38,2),
 	sql_handle VARBINARY(64),
 	INDEX px_ix_ids CLUSTERED (sql_handle)
+);
+
+
+DROP TABLE IF EXISTS #est_rows;
+
+CREATE TABLE #est_rows 
+(
+	estimated_rows DECIMAL(38,2),
+	query_hash BINARY(8),
+	INDEX px_ix_ids CLUSTERED (query_hash)
 );
 
 
@@ -2134,20 +2145,22 @@ table_dml AS (
 OPTION (RECOMPILE);
 
 RAISERROR(N'Gathering row estimates', 0, 1) WITH NOWAIT;
-WITH XMLNAMESPACES ('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p ),
-est_rows AS(
-SELECT s.sql_handle, c.n.value('(/p:StmtSimple/@StatementEstRows)[1]', 'FLOAT') AS estimated_rows
+WITH XMLNAMESPACES ('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
+INSERT #est_rows (query_hash, estimated_rows)
+SELECT DISTINCT 
+		CONVERT(BINARY(8), RIGHT('0000000000000000' + SUBSTRING(c.n.value('@QueryHash', 'VARCHAR(18)'), 3, 18), 16), 2) AS query_hash,
+		c.n.value('(/p:StmtSimple/@StatementEstRows)[1]', 'FLOAT') AS estimated_rows
 FROM   #statements AS s
-CROSS APPLY s.statement.nodes('//p:StmtSimple') AS c(n)
+CROSS APPLY s.statement.nodes('/p:StmtSimple') AS c(n)
 WHERE  c.n.exist('/p:StmtSimple[@StatementEstRows > 0]') = 1
-)
+
 	UPDATE b
 		SET b.estimated_rows = er.estimated_rows
 	FROM #working_warnings AS b
-	JOIN est_rows er
-	ON er.sql_handle = b.sql_handle
-	WHERE b.proc_or_function_name = 'Statement'
+	JOIN #est_rows er
+	ON er.query_hash = b.query_hash
 	OPTION (RECOMPILE);
+
 
 /*Begin plan cost calculations*/
 RAISERROR(N'Gathering statement costs', 0, 1) WITH NOWAIT;
@@ -2620,7 +2633,21 @@ JOIN #trace_flags tf
 ON tf.sql_handle = b.sql_handle 
 OPTION (RECOMPILE);
 
-
+RAISERROR(N'Is Paul White Electric?', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
+is_paul_white_electric AS (
+SELECT 1 AS [is_paul_white_electric], 
+r.sql_handle
+FROM #relop AS r
+CROSS APPLY r.relop.nodes('//p:RelOp') c(n)
+WHERE c.n.exist('@PhysicalOp[.="Switch"]') = 1
+)
+UPDATE b
+SET    b.is_paul_white_electric = ipwe.is_paul_white_electric
+FROM   #working_warnings AS b
+JOIN is_paul_white_electric ipwe 
+ON ipwe.sql_handle = b.sql_handle 
+OPTION (RECOMPILE);
 
 RAISERROR(N'General query dispositions: frequent executions, long running, etc.', 0, 1) WITH NOWAIT;
 
@@ -2711,7 +2738,8 @@ SET    b.warnings = SUBSTRING(
 				  CASE WHEN b.is_spool_more_rows = 1 THEN + ', Large Index Row Spool' ELSE '' END +
 				  CASE WHEN b.is_bad_estimate = 1 THEN + ', Row estimate mismatch' ELSE '' END +
 				  CASE WHEN b.is_big_log = 1 THEN + ', High log use' ELSE '' END +
-				  CASE WHEN b.is_big_tempdb = 1 THEN ', High tempdb use' ELSE '' END  
+				  CASE WHEN b.is_big_tempdb = 1 THEN ', High tempdb use' ELSE '' END +
+				  CASE WHEN b.is_paul_white_electric = 1 THEN ', SWITCH!' ELSE '' END
                   , 2, 200000) 
 FROM #working_warnings b
 OPTION (RECOMPILE);
@@ -2835,7 +2863,7 @@ WITH x AS (
 SELECT wpt.database_name, ww.query_cost, wm.plan_id, wm.query_id, wpt.query_sql_text, wm.proc_or_function_name, wpt.query_plan_xml, ww.warnings, wpt.pattern, 
 	   wm.parameter_sniffing_symptoms, wpt.top_three_waits, wm.count_executions, wm.count_compiles, wm.total_cpu_time, wm.avg_cpu_time,
 	   wm.total_duration, wm.avg_duration, wm.total_logical_io_reads, wm.avg_logical_io_reads,
-	   wm.total_physical_io_reads, wm.avg_physical_io_reads, wm.total_logical_io_writes, wm.avg_logical_io_writes,
+	   wm.total_physical_io_reads, wm.avg_physical_io_reads, wm.total_logical_io_writes, wm.avg_logical_io_writes, wm.total_rowcount, wm.avg_rowcount,
 	   wm.total_query_max_used_memory, wm.avg_query_max_used_memory, wm.total_tempdb_space_used, wm.avg_tempdb_space_used,
 	   wm.total_log_bytes_used, wm.avg_log_bytes_used, wm.total_num_physical_io_reads, wm.avg_num_physical_io_reads,
 	   wm.first_execution_time, wm.last_execution_time, wpt.last_force_failure_reason_desc, wpt.context_settings, ROW_NUMBER() OVER (PARTITION BY wm.plan_id, wm.query_id, wm.last_execution_time ORDER BY wm.plan_id) AS rn
@@ -2864,7 +2892,7 @@ WITH x AS (
 SELECT wpt.database_name, ww.query_cost, wm.plan_id, wm.query_id, wpt.query_sql_text, wm.proc_or_function_name, wpt.query_plan_xml, ww.warnings, wpt.pattern, 
 	   wm.parameter_sniffing_symptoms, wpt.last_force_failure_reason_desc, wpt.top_three_waits, wm.count_executions, wm.count_compiles, wm.total_cpu_time, wm.avg_cpu_time,
 	   wm.total_duration, wm.avg_duration, wm.total_logical_io_reads, wm.avg_logical_io_reads,
-	   wm.total_physical_io_reads, wm.avg_physical_io_reads, wm.total_logical_io_writes, wm.avg_logical_io_writes,
+	   wm.total_physical_io_reads, wm.avg_physical_io_reads, wm.total_logical_io_writes, wm.avg_logical_io_writes, wm.total_rowcount, wm.avg_rowcount,
 	   wm.total_query_max_used_memory, wm.avg_query_max_used_memory, wm.total_tempdb_space_used, wm.avg_tempdb_space_used,
 	   wm.total_log_bytes_used, wm.avg_log_bytes_used, wm.total_num_physical_io_reads, wm.avg_num_physical_io_reads,
 	   wm.first_execution_time, wm.last_execution_time, wpt.context_settings, ROW_NUMBER() OVER (PARTITION BY wm.plan_id, wm.query_id, wm.last_execution_time ORDER BY wm.plan_id) AS rn
@@ -2897,7 +2925,7 @@ WITH x AS (
 SELECT wpt.database_name, ww.query_cost, wm.plan_id, wm.query_id, wpt.query_sql_text, wm.proc_or_function_name, ww.warnings, wpt.pattern, 
 	   wm.parameter_sniffing_symptoms, wpt.last_force_failure_reason_desc, wpt.top_three_waits, wm.count_executions, wm.count_compiles, wm.total_cpu_time, wm.avg_cpu_time,
 	   wm.total_duration, wm.avg_duration, wm.total_logical_io_reads, wm.avg_logical_io_reads,
-	   wm.total_physical_io_reads, wm.avg_physical_io_reads, wm.total_logical_io_writes, wm.avg_logical_io_writes,
+	   wm.total_physical_io_reads, wm.avg_physical_io_reads, wm.total_logical_io_writes, wm.avg_logical_io_writes, wm.total_rowcount, wm.avg_rowcount,
 	   wm.total_query_max_used_memory, wm.avg_query_max_used_memory, wm.total_tempdb_space_used, wm.avg_tempdb_space_used,
 	   wm.total_log_bytes_used, wm.avg_log_bytes_used, wm.total_num_physical_io_reads, wm.avg_num_physical_io_reads,
 	   wm.first_execution_time, wm.last_execution_time, wpt.context_settings, ROW_NUMBER() OVER (PARTITION BY wm.plan_id, wm.query_id, wm.last_execution_time ORDER BY wm.plan_id) AS rn
@@ -2926,7 +2954,7 @@ WITH x AS (
 SELECT wpt.database_name, wm.plan_id, wm.query_id, wpt.query_sql_text, wpt.query_plan_xml, wpt.pattern, 
 	   wm.parameter_sniffing_symptoms, wpt.top_three_waits, wm.count_executions, wm.count_compiles, wm.total_cpu_time, wm.avg_cpu_time,
 	   wm.total_duration, wm.avg_duration, wm.total_logical_io_reads, wm.avg_logical_io_reads,
-	   wm.total_physical_io_reads, wm.avg_physical_io_reads, wm.total_logical_io_writes, wm.avg_logical_io_writes,
+	   wm.total_physical_io_reads, wm.avg_physical_io_reads, wm.total_logical_io_writes, wm.avg_logical_io_writes, wm.total_rowcount, wm.avg_rowcount,
 	   wm.total_query_max_used_memory, wm.avg_query_max_used_memory, wm.total_tempdb_space_used, wm.avg_tempdb_space_used,
 	   wm.total_log_bytes_used, wm.avg_log_bytes_used, wm.total_num_physical_io_reads, wm.avg_num_physical_io_reads,
 	   wm.first_execution_time, wm.last_execution_time, wpt.last_force_failure_reason_desc, wpt.context_settings, ROW_NUMBER() OVER (PARTITION BY wm.plan_id, wm.query_id, wm.last_execution_time ORDER BY wm.plan_id) AS rn
@@ -3668,7 +3696,20 @@ BEGIN
                      'High tempdb use',
                      'This query uses more than half of a data file on average',
                      'No URL yet',
-                     'You should take a look at tempdb waits to see if you''re having problems') ;						
+                     'You should take a look at tempdb waits to see if you''re having problems') ;	
+					
+        IF EXISTS (SELECT 1/0
+                    FROM   #working_warnings p
+                    WHERE  p.is_paul_white_electric = 1
+  					)
+             INSERT INTO #warning_results (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+             VALUES (
+                     998,
+                     200,
+                     'Is Paul White Electric?',
+                     'This query has a Switch operator in it!',
+                     'http://sqlblog.com/blogs/paul_white/archive/2013/06/11/hello-operator-my-switch-is-bored.aspx',
+                     'You should email this query plan to Paul: SQLkiwi at gmail dot com') ;						 					
 				
 				INSERT INTO #warning_results (CheckID, Priority, FindingsGroup, Finding, URL, Details)
 				SELECT 				
@@ -3905,6 +3946,10 @@ OPTION (RECOMPILE);
 
 SELECT '#plan_cost' AS table_name,  * 
 FROM #plan_cost AS pc
+OPTION (RECOMPILE);
+
+SELECT '#est_rows' AS table_name,  * 
+FROM #est_rows AS er
 OPTION (RECOMPILE);
 
 END; 
