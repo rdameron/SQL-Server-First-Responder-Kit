@@ -705,7 +705,8 @@ CREATE TABLE #plan_cost
 (
 	query_plan_cost DECIMAL(38,2),
 	sql_handle VARBINARY(64),
-	INDEX px_ix_ids CLUSTERED (sql_handle)
+	plan_id INT,
+	INDEX px_ix_ids CLUSTERED (sql_handle, plan_id)
 );
 
 
@@ -1945,7 +1946,7 @@ JOIN   #working_metrics AS wm
 ON ww.plan_id = wm.plan_id
    AND ww.query_id = wm.query_id
    AND wm.query_parameterization_type_desc = 'None'
-   AND ww.proc_or_function_name IS NOT NULL
+   AND ww.proc_or_function_name = 'Statement'
 OPTION (RECOMPILE);
 
 
@@ -2166,10 +2167,11 @@ WHERE  c.n.exist('/p:StmtSimple[@StatementEstRows > 0]') = 1
 RAISERROR(N'Gathering statement costs', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 INSERT #plan_cost WITH (TABLOCK)
-	( query_plan_cost, sql_handle )
+	( query_plan_cost, sql_handle, plan_id )
 SELECT  DISTINCT
 		s.statement.value('sum(/p:StmtSimple/@StatementSubTreeCost)', 'float') query_plan_cost,
-		s.sql_handle
+		s.sql_handle,
+		s.plan_id
 FROM    #statements s
 OUTER APPLY s.statement.nodes('/p:StmtSimple') AS q(n)
 WHERE s.statement.value('sum(/p:StmtSimple/@StatementSubTreeCost)', 'float') > 0
@@ -2178,15 +2180,16 @@ OPTION (RECOMPILE);
 
 RAISERROR(N'Updating statement costs', 0, 1) WITH NOWAIT;
 WITH pc AS (
-	SELECT SUM(DISTINCT pc.query_plan_cost) AS queryplancostsum, pc.sql_handle
+	SELECT SUM(DISTINCT pc.query_plan_cost) AS queryplancostsum, pc.sql_handle, pc.plan_id
 	FROM #plan_cost AS pc
-	GROUP BY pc.sql_handle
+	GROUP BY pc.sql_handle, pc.plan_id
 	)
 	UPDATE b
 		SET b.query_cost = ISNULL(pc.queryplancostsum, 0)
 		FROM  #working_warnings AS b
 		JOIN pc
 		ON pc.sql_handle = b.sql_handle
+		AND pc.plan_id = b.plan_id
 OPTION (RECOMPILE);
 
 
@@ -2776,55 +2779,55 @@ UPDATE b
 SET b.parameter_sniffing_symptoms = 
 	SUBSTRING(  
 				/*Duration*/
-				CASE WHEN (b.min_duration * 10000) < (b.avg_duration) THEN ', Fast sometimes' ELSE '' END +
-				CASE WHEN (b.max_duration) > (b.avg_duration * 10000) THEN ', Slow sometimes' ELSE '' END +
-				CASE WHEN (b.last_duration * 10000) < (b.avg_duration)  THEN ', Fast last run' ELSE '' END +
-				CASE WHEN (b.last_duration) > (b.avg_duration * 10000) THEN ', Slow last run' ELSE '' END +
+				CASE WHEN (b.min_duration * 100) < (b.avg_duration) THEN ', Fast sometimes' ELSE '' END +
+				CASE WHEN (b.max_duration) > (b.avg_duration * 100) THEN ', Slow sometimes' ELSE '' END +
+				CASE WHEN (b.last_duration * 100) < (b.avg_duration)  THEN ', Fast last run' ELSE '' END +
+				CASE WHEN (b.last_duration) > (b.avg_duration * 100) THEN ', Slow last run' ELSE '' END +
 				/*CPU*/
-				CASE WHEN (b.min_cpu_time / b.avg_dop) * 10000 < (b.avg_cpu_time / b.avg_dop) THEN ', Low CPU sometimes' ELSE '' END +
-				CASE WHEN (b.max_cpu_time / b.max_dop) > (b.avg_cpu_time / b.avg_dop) * 10000 THEN ', High CPU sometimes' ELSE '' END +
-				CASE WHEN (b.last_cpu_time / b.last_dop) * 10000 < (b.avg_cpu_time / b.avg_dop)  THEN ', Low CPU last run' ELSE '' END +
-				CASE WHEN (b.last_cpu_time / b.last_dop) > (b.avg_cpu_time / b.avg_dop) * 10000 THEN ', High CPU last run' ELSE '' END +
+				CASE WHEN (b.min_cpu_time / b.avg_dop) * 100 < (b.avg_cpu_time / b.avg_dop) THEN ', Low CPU sometimes' ELSE '' END +
+				CASE WHEN (b.max_cpu_time / b.max_dop) > (b.avg_cpu_time / b.avg_dop) * 100 THEN ', High CPU sometimes' ELSE '' END +
+				CASE WHEN (b.last_cpu_time / b.last_dop) * 100 < (b.avg_cpu_time / b.avg_dop)  THEN ', Low CPU last run' ELSE '' END +
+				CASE WHEN (b.last_cpu_time / b.last_dop) > (b.avg_cpu_time / b.avg_dop) * 100 THEN ', High CPU last run' ELSE '' END +
 				/*Logical Reads*/
-				CASE WHEN (b.min_logical_io_reads * 10000) < (b.avg_logical_io_reads) THEN ', Low reads sometimes' ELSE '' END +
-				CASE WHEN (b.max_logical_io_reads) > (b.avg_logical_io_reads * 10000) THEN ', High reads sometimes' ELSE '' END +
-				CASE WHEN (b.last_logical_io_reads * 10000) < (b.avg_logical_io_reads)  THEN ', Low reads last run' ELSE '' END +
-				CASE WHEN (b.last_logical_io_reads) > (b.avg_logical_io_reads * 10000) THEN ', High reads last run' ELSE '' END +
+				CASE WHEN (b.min_logical_io_reads * 100) < (b.avg_logical_io_reads) THEN ', Low reads sometimes' ELSE '' END +
+				CASE WHEN (b.max_logical_io_reads) > (b.avg_logical_io_reads * 100) THEN ', High reads sometimes' ELSE '' END +
+				CASE WHEN (b.last_logical_io_reads * 100) < (b.avg_logical_io_reads)  THEN ', Low reads last run' ELSE '' END +
+				CASE WHEN (b.last_logical_io_reads) > (b.avg_logical_io_reads * 100) THEN ', High reads last run' ELSE '' END +
 				/*Logical Writes*/
-				CASE WHEN (b.min_logical_io_writes * 10000) < (b.avg_logical_io_writes) THEN ', Low writes sometimes' ELSE '' END +
-				CASE WHEN (b.max_logical_io_writes) > (b.avg_logical_io_writes * 10000) THEN ', High writes sometimes' ELSE '' END +
-				CASE WHEN (b.last_logical_io_writes * 10000) < (b.avg_logical_io_writes)  THEN ', Low writes last run' ELSE '' END +
-				CASE WHEN (b.last_logical_io_writes) > (b.avg_logical_io_writes * 10000) THEN ', High writes last run' ELSE '' END +
+				CASE WHEN (b.min_logical_io_writes * 100) < (b.avg_logical_io_writes) THEN ', Low writes sometimes' ELSE '' END +
+				CASE WHEN (b.max_logical_io_writes) > (b.avg_logical_io_writes * 100) THEN ', High writes sometimes' ELSE '' END +
+				CASE WHEN (b.last_logical_io_writes * 100) < (b.avg_logical_io_writes)  THEN ', Low writes last run' ELSE '' END +
+				CASE WHEN (b.last_logical_io_writes) > (b.avg_logical_io_writes * 100) THEN ', High writes last run' ELSE '' END +
 				/*Physical Reads*/
-				CASE WHEN (b.min_physical_io_reads * 10000) < (b.avg_physical_io_reads) THEN ', Low physical reads sometimes' ELSE '' END +
-				CASE WHEN (b.max_physical_io_reads) > (b.avg_physical_io_reads * 10000) THEN ', High physical reads sometimes' ELSE '' END +
-				CASE WHEN (b.last_physical_io_reads * 10000) < (b.avg_physical_io_reads)  THEN ', Low physical reads last run' ELSE '' END +
-				CASE WHEN (b.last_physical_io_reads) > (b.avg_physical_io_reads * 10000) THEN ', High physical reads last run' ELSE '' END +
+				CASE WHEN (b.min_physical_io_reads * 100) < (b.avg_physical_io_reads) THEN ', Low physical reads sometimes' ELSE '' END +
+				CASE WHEN (b.max_physical_io_reads) > (b.avg_physical_io_reads * 100) THEN ', High physical reads sometimes' ELSE '' END +
+				CASE WHEN (b.last_physical_io_reads * 100) < (b.avg_physical_io_reads)  THEN ', Low physical reads last run' ELSE '' END +
+				CASE WHEN (b.last_physical_io_reads) > (b.avg_physical_io_reads * 100) THEN ', High physical reads last run' ELSE '' END +
 				/*Memory*/
-				CASE WHEN (b.min_query_max_used_memory * 10000) < (b.avg_query_max_used_memory) THEN ', Low memory sometimes' ELSE '' END +
-				CASE WHEN (b.max_query_max_used_memory) > (b.avg_query_max_used_memory * 10000) THEN ', High memory sometimes' ELSE '' END +
-				CASE WHEN (b.last_query_max_used_memory * 10000) < (b.avg_query_max_used_memory)  THEN ', Low memory last run' ELSE '' END +
-				CASE WHEN (b.last_query_max_used_memory) > (b.avg_query_max_used_memory * 10000) THEN ', High memory last run' ELSE '' END +
+				CASE WHEN (b.min_query_max_used_memory * 100) < (b.avg_query_max_used_memory) THEN ', Low memory sometimes' ELSE '' END +
+				CASE WHEN (b.max_query_max_used_memory) > (b.avg_query_max_used_memory * 100) THEN ', High memory sometimes' ELSE '' END +
+				CASE WHEN (b.last_query_max_used_memory * 100) < (b.avg_query_max_used_memory)  THEN ', Low memory last run' ELSE '' END +
+				CASE WHEN (b.last_query_max_used_memory) > (b.avg_query_max_used_memory * 100) THEN ', High memory last run' ELSE '' END +
 				/*Duration*/
-				CASE WHEN b.min_rowcount * 10000 < b.avg_rowcount THEN ', Low row count sometimes' ELSE '' END +
-				CASE WHEN b.max_rowcount > b.avg_rowcount * 10000 THEN ', High row count sometimes' ELSE '' END +
-				CASE WHEN b.last_rowcount * 10000 < b.avg_rowcount  THEN ', Low row count run' ELSE '' END +
-				CASE WHEN b.last_rowcount > b.avg_rowcount * 10000 THEN ', High row count last run' ELSE '' END +
+				CASE WHEN b.min_rowcount * 100 < b.avg_rowcount THEN ', Low row count sometimes' ELSE '' END +
+				CASE WHEN b.max_rowcount > b.avg_rowcount * 100 THEN ', High row count sometimes' ELSE '' END +
+				CASE WHEN b.last_rowcount * 100 < b.avg_rowcount  THEN ', Low row count run' ELSE '' END +
+				CASE WHEN b.last_rowcount > b.avg_rowcount * 100 THEN ', High row count last run' ELSE '' END +
 				/*DOP*/
 				CASE WHEN b.min_dop = 1 THEN ', Serial sometimes' ELSE '' END +
 				CASE WHEN b.max_dop > 1 THEN ', Parallel sometimes' ELSE '' END +
 				CASE WHEN b.last_dop = 1  THEN ', Serial last run' ELSE '' END +
 				CASE WHEN b.last_dop > 1 THEN ', Parallel last run' ELSE '' END +
 				/*tempdb*/
-				CASE WHEN b.min_tempdb_space_used * 10000 < b.avg_tempdb_space_used THEN ', Low tempdb sometimes' ELSE '' END +
-				CASE WHEN b.max_tempdb_space_used > b.avg_tempdb_space_used * 10000 THEN ', High tempdb sometimes' ELSE '' END +
-				CASE WHEN b.last_tempdb_space_used * 10000 < b.avg_tempdb_space_used  THEN ', Low tempdb run' ELSE '' END +
-				CASE WHEN b.last_tempdb_space_used > b.avg_tempdb_space_used * 10000 THEN ', High tempdb last run' ELSE '' END +
+				CASE WHEN b.min_tempdb_space_used * 100 < b.avg_tempdb_space_used THEN ', Low tempdb sometimes' ELSE '' END +
+				CASE WHEN b.max_tempdb_space_used > b.avg_tempdb_space_used * 100 THEN ', High tempdb sometimes' ELSE '' END +
+				CASE WHEN b.last_tempdb_space_used * 100 < b.avg_tempdb_space_used  THEN ', Low tempdb run' ELSE '' END +
+				CASE WHEN b.last_tempdb_space_used > b.avg_tempdb_space_used * 100 THEN ', High tempdb last run' ELSE '' END +
 				/*tlog*/
-				CASE WHEN b.min_log_bytes_used * 10000 < b.avg_log_bytes_used THEN ', Low log use sometimes' ELSE '' END +
-				CASE WHEN b.max_log_bytes_used > b.avg_log_bytes_used * 10000 THEN ', High log use sometimes' ELSE '' END +
-				CASE WHEN b.last_log_bytes_used * 10000 < b.avg_log_bytes_used  THEN ', Low log use run' ELSE '' END +
-				CASE WHEN b.last_log_bytes_used > b.avg_log_bytes_used * 10000 THEN ', High log use last run' ELSE '' END 
+				CASE WHEN b.min_log_bytes_used * 100 < b.avg_log_bytes_used THEN ', Low log use sometimes' ELSE '' END +
+				CASE WHEN b.max_log_bytes_used > b.avg_log_bytes_used * 100 THEN ', High log use sometimes' ELSE '' END +
+				CASE WHEN b.last_log_bytes_used * 100 < b.avg_log_bytes_used  THEN ', Low log use run' ELSE '' END +
+				CASE WHEN b.last_log_bytes_used > b.avg_log_bytes_used * 100 THEN ', High log use last run' ELSE '' END 
 	, 2, 200000) 
 FROM #working_metrics AS b
 OPTION (RECOMPILE);
@@ -3833,6 +3836,20 @@ BEGIN
 			SELECT 1002, 255, 'Worsts', 'Worst Row Counts', 'N/A', rowcount_worst.msg
 			FROM rowcount_worst
 			OPTION (RECOMPILE);
+
+
+        IF NOT EXISTS (SELECT 1/0
+					   FROM   #warning_results AS bcr
+                       WHERE  bcr.Priority = 2147483646
+				      )
+            INSERT INTO #warning_results (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+            VALUES (2147483646,
+                    255,
+                    'Need more help?' ,
+                    'Paste your plan on the internet!',
+                    'http://pastetheplan.com',
+                    'This makes it easy to share plans and post them to Q&A sites like https://dba.stackexchange.com/!') ;
+
 
         IF NOT EXISTS (SELECT 1/0
 					   FROM   #warning_results AS bcr

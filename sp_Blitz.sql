@@ -4251,7 +4251,7 @@ IF @ProductVersionMajor >= 10
 													'Hey big spender, you have ' + CAST(COUNT_BIG(*) AS VARCHAR(30)) + ' Extended Events sessions running. You sure you meant to do that?' AS Details
 											    FROM sys.dm_xe_sessions
 												WHERE [name] NOT IN
-												('system_health', 'sp_server_diagnostics session', 'hkenginexesession', 'telemetry_xevents')
+												( 'AlwaysOn_health', 'system_health', 'telemetry_xevents', 'sp_server_diagnostics', 'hkenginexesession' )
 												AND name NOT LIKE '%$A%'
 											  HAVING COUNT_BIG(*) >= 2; 
 								END;	
@@ -4617,6 +4617,7 @@ IF @ProductVersionMajor >= 10
 			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKALLOC%'
 			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKCATALOG%'
 			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKCONSTRAINTS%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKDB%'
 			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKFILEGROUP%'
 			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKIDENT%'
 			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKPRIMARYFILE%'
