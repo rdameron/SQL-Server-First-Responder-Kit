@@ -9,7 +9,7 @@ If you want to change anything about a check - the priority, finding, URL, or ID
 | Priority | FindingsGroup | Finding | URL | CheckID |
 |----------|-----------------------------|---------------------------------------------------------|------------------------------------------------------------------------|----------|
 | 0 | Outdated sp_Blitz | sp_Blitz is Over 6 Months Old | https://www.BrentOzar.com/blitz/ | 155 |
-| 0 | Informational | @CheckUserDatabaseObjects Disabled | https://www.BrentOzar.com/blitz/ | 201 |
+| 0 | Informational | @CheckUserDatabaseObjects Disabled | https://www.BrentOzar.com/blitz/ | 204 |
 | 1 | Backup | Backing Up to Same Drive Where Databases Reside | https://www.BrentOzar.com/go/backup | 93 |
 | 1 | Backup | Backups Not Performed Recently | https://www.BrentOzar.com/go/nobak | 1 |
 | 1 | Backup | Encryption Certificate Not Backed Up Recently | https://www.BrentOzar.com/go/tde | 202 |
@@ -27,12 +27,15 @@ If you want to change anything about a check - the priority, finding, URL, or ID
 | 10 | Performance | 32-bit SQL Server Installed | https://www.BrentOzar.com/go/32bit | 154 |
 | 10 | Performance | Auto-Close Enabled | https://www.BrentOzar.com/go/autoclose | 12 |
 | 10 | Performance | Auto-Shrink Enabled | https://www.BrentOzar.com/go/autoshrink | 13 |
+| 10 | Performance | Auto-Shrink Ran Recently| https://www.BrentOzar.com/go/autoshrink | 206 |
 | 10 | Performance | CPU Schedulers Offline | https://www.BrentOzar.com/go/schedulers | 101 |
 | 10 | Performance | CPU w/Odd Number of Cores | https://www.BrentOzar.com/go/oddity | 198 |
+| 10 | Performance | DBCC DROPCLEANBUFFERS Ran Recently | | 207 |
+| 10 | Performance | DBCC FREEPROCCACHE Ran Recently | | 208 |
+| 10 | Performance | DBCC SHRINK% Ran Recently | | 210 |
 | 10 | Performance | High Memory Use for In-Memory OLTP (Hekaton) | https://www.BrentOzar.com/go/hekaton | 145 |
 | 10 | Performance | Memory Nodes Offline | https://www.BrentOzar.com/go/schedulers | 110 |
 | 10 | Performance | Plan Cache Erased Recently | https://www.BrentOzar.com/askbrent/plan-cache-erased-recently/ | 125 |
-| 10 | Performance | Query Store Disabled | https://www.BrentOzar.com/go/querystore | 163 |
 | 20 | Reliability | Dangerous Build of SQL Server (Corruption) | http://sqlperformance.com/2014/06/sql-indexes/hotfix-sql-2012-rebuilds | 129 |
 | 20 | Reliability | Dangerous Build of SQL Server (Security) | https://technet.microsoft.com/en-us/library/security/MS14-044 | 157 |
 | 20 | Reliability | Databases in Unusual States | https://www.BrentOzar.com/go/repair | 102 |
@@ -43,13 +46,16 @@ If you want to change anything about a check - the priority, finding, URL, or ID
 | 20 | Reliability | Unsupported Build of SQL Server | https://www.BrentOzar.com/go/unsupported | 128 |
 | 20 | Reliability | User Databases on C Drive | https://www.BrentOzar.com/go/cdrive | 26 |
 | 20 | Reliability | TempDB on C Drive | https://www.BrentOzar.com/go/cdrive | 25 |
-| 50 | Performance | Instant File Initialization Not Enabled | https://www.BrentOzar.com/go/instant | 192 |
+| 50 | DBCC Events | Overall Events | | 203 |
 | 50 | Performance | File Growths Slow | https://www.BrentOzar.com/go/filegrowth | 151 |
+| 50 | Performance | Instant File Initialization Not Enabled | https://www.BrentOzar.com/go/instant | 192 |
 | 50 | Performance | Poison Wait Detected | https://www.BrentOzar.com/go/poison | 107 |
 | 50 | Performance | Poison Wait Detected: CMEMTHREAD & NUMA | https://www.BrentOzar.com/go/poison | 162 |
 | 50 | Performance | Poison Wait Detected: Serializable Locking | https://www.BrentOzar.com/go/serializable | 121 |
 | 50 | Performance | Too Much Free Memory | https://www.BrentOzar.com/go/freememory | 165 |
+| 50 | Performance | Wait Stats Cleared Recently| | 205 |
 | 50 | Reliability | Database Snapshot Online | https://www.BrentOzar.com/go/snapshot | 77 |
+| 50 | Reliability | DBCC WRITEPAGE Used Recently | | 209 |
 | 50 | Reliability | Errors Logged Recently in the Default Trace | https://www.BrentOzar.com/go/defaulttrace | 150 |
 | 50 | Reliability | Full Text Indexes Not Updating | https://www.BrentOzar.com/go/fulltext | 113 |
 | 50 | Reliability | Page Verification Not Optimal | https://www.BrentOzar.com/go/torn | 14 |
@@ -218,10 +224,11 @@ If you want to change anything about a check - the priority, finding, URL, or ID
 | 200 | Performance | Buffer Pool Extensions Enabled | https://www.BrentOzar.com/go/bpe | 174 |
 | 200 | Performance | Default Parallelism Settings | https://www.BrentOzar.com/go/cxpacket | 188 |
 | 200 | Performance | In-Memory OLTP (Hekaton) In Use | https://www.BrentOzar.com/go/hekaton | 146 |
+| 200 | Performance | Non-Dynamic Memory | https://www.BrentOzar.com/go/memory | 190 |
 | 200 | Performance | Old Compatibility Level | https://www.BrentOzar.com/go/compatlevel | 62 |
+| 200 | Performance | Query Store Disabled | https://www.BrentOzar.com/go/querystore | 163 |
 | 200 | Performance | Snapshot Backups Occurring | https://www.BrentOzar.com/go/snaps | 178 |
 | 200 | Performance | User-Created Statistics In Place | https://www.BrentOzar.com/go/userstats | 122 |
-| 200 | Performance | Non-Dynamic Memory | https://www.BrentOzar.com/go/memory | 190 |
 | 200 | Reliability | Extended Stored Procedures in Master | https://www.BrentOzar.com/go/clr | 105 |
 | 200 | Surface Area | Endpoints Configured | https://www.BrentOzar.com/go/endpoints/ | 9 |
 | 210 | Non-Default Database Config | ANSI NULL Default Enabled | https://www.BrentOzar.com/go/dbdefaults | 135 |
