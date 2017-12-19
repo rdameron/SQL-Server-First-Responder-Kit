@@ -1136,20 +1136,6 @@ CREATE TABLE #configuration (
     value DECIMAL(38,0)
 );
 
-CREATE TABLE #stored_proc_info
-(
-    SPID INT,
-	SqlHandle VARBINARY(64),
-    QueryHash BINARY(8),
-    variable_name NVARCHAR(128),
-    variable_datatype NVARCHAR(128),
-	converted_column_name NVARCHAR(128),
-    compile_time_value NVARCHAR(128),
-    proc_name NVARCHAR(300),
-    column_name NVARCHAR(128),
-    converted_to NVARCHAR(128)
-);
-
 CREATE TABLE #plan_creation
 (
     percent_24 DECIMAL(5, 2),
@@ -1200,14 +1186,28 @@ CREATE TABLE #trace_flags
     session_trace_flags VARCHAR(1000)
 );
 
+CREATE TABLE #stored_proc_info
+(
+    SPID INT,
+	SqlHandle VARBINARY(64),
+    QueryHash BINARY(8),
+    variable_name NVARCHAR(256),
+    variable_datatype NVARCHAR(256),
+	converted_column_name NVARCHAR(256),
+    compile_time_value NVARCHAR(4000),
+    proc_name NVARCHAR(1000),
+    column_name NVARCHAR(256),
+    converted_to NVARCHAR(256)
+);
+
 CREATE TABLE #variable_info
 (
     SPID INT,
     QueryHash BINARY(8),
     SqlHandle VARBINARY(64),
-    proc_name NVARCHAR(128),
-    variable_name NVARCHAR(200),
-    variable_datatype NVARCHAR(128),
+    proc_name NVARCHAR(1000),
+    variable_name NVARCHAR(256),
+    variable_datatype NVARCHAR(256),
     compile_time_value NVARCHAR(4000)
 );
 
@@ -1216,7 +1216,7 @@ CREATE TABLE #conversion_info
     SPID INT,
     QueryHash BINARY(8),
     SqlHandle VARBINARY(64),
-    proc_name NVARCHAR(128),
+    proc_name NVARCHAR(256),
     expression NVARCHAR(4000),
     at_charindex AS CHARINDEX('@', expression),
     bracket_charindex AS CHARINDEX(']', expression, CHARINDEX('@', expression)) - CHARINDEX('@', expression),
@@ -1744,7 +1744,10 @@ SET @body_where += N'       AND pa.attribute = ' + QUOTENAME('dbid', @q ) + @nl 
 SET @plans_triggers_select_list += N'
 SELECT TOP (@Top)
        @@SPID ,
-       ''Procedure or Function: '' + COALESCE(OBJECT_NAME(qs.object_id, qs.database_id),'''') AS QueryType,
+       ''Procedure or Function: '' 
+	   + QUOTENAME(COALESCE(OBJECT_SCHEMA_NAME(qs.object_id, qs.database_id),''''))
+	   + ''.''
+	   + QUOTENAME(COALESCE(OBJECT_NAME(qs.object_id, qs.database_id),'''')) AS QueryType,
        COALESCE(DB_NAME(database_id), CAST(pa.value AS sysname), ''-- N/A --'') AS DatabaseName,
        (total_worker_time / 1000.0) / execution_count AS AvgCPU ,
        (total_worker_time / 1000.0) AS TotalCPU ,
@@ -3095,12 +3098,10 @@ INSERT #variable_info ( SPID, QueryHash, SqlHandle, proc_name, variable_name, va
 SELECT      DISTINCT @@SPID,
             qp.QueryHash,
             qp.SqlHandle,
-            CASE WHEN b.QueryType = 'Statement' THEN b.QueryType
-                 ELSE SUBSTRING(b.QueryType, CHARINDEX('[', b.QueryType), LEN(b.QueryType) - CHARINDEX('[', b.QueryType))
-            END AS proc_name,
-            q.n.value('@Column', 'NVARCHAR(128)') AS variable_name,
-            q.n.value('@ParameterDataType', 'NVARCHAR(128)') AS variable_datatype,
-            q.n.value('@ParameterCompiledValue', 'NVARCHAR(1000)') AS compile_time_value
+            b.QueryType AS proc_name,
+            q.n.value('@Column', 'NVARCHAR(256)') AS variable_name,
+            q.n.value('@ParameterDataType', 'NVARCHAR(256)') AS variable_datatype,
+            q.n.value('@ParameterCompiledValue', 'NVARCHAR(4000)') AS compile_time_value
 FROM        #query_plan AS qp
 JOIN        ##bou_BlitzCacheProcs AS b
 ON (b.QueryType = 'adhoc' AND b.QueryHash = qp.QueryHash)
@@ -3115,10 +3116,8 @@ INSERT #conversion_info ( SPID, QueryHash, SqlHandle, proc_name, expression )
 SELECT      DISTINCT @@SPID,
             qp.QueryHash,
             qp.SqlHandle,
-            CASE WHEN b.QueryType = 'Statement' THEN b.QueryType
-                 ELSE SUBSTRING(b.QueryType, CHARINDEX('[', b.QueryType), LEN(b.QueryType) - CHARINDEX('[', b.QueryType))
-            END AS proc_name,
-            qq.c.value('@Expression', 'NVARCHAR(128)') AS expression
+            b.QueryType AS proc_name,
+            qq.c.value('@Expression', 'NVARCHAR(4000)') AS expression
 FROM        #query_plan AS qp
 JOIN        ##bou_BlitzCacheProcs AS b
 ON (b.QueryType = 'adhoc' AND b.QueryHash = qp.QueryHash)
@@ -3135,7 +3134,7 @@ INSERT #stored_proc_info ( SPID, SqlHandle, QueryHash, proc_name, variable_name,
 SELECT @@SPID AS SPID,
        ci.SqlHandle,
        ci.QueryHash,
-       ci.proc_name,
+       REPLACE(REPLACE(REPLACE(ci.proc_name, ')', ''), 'Statement (parent ', ''), 'Procedure or Function: ', '') AS proc_name,
        CASE WHEN ci.at_charindex > 0
                  AND ci.bracket_charindex > 0 
 			THEN SUBSTRING(ci.expression, ci.at_charindex, ci.bracket_charindex)
@@ -3175,32 +3174,34 @@ SELECT @@SPID AS SPID,
 FROM   #conversion_info AS ci
 OPTION ( RECOMPILE );
 
-IF EXISTS (	SELECT * 
-			FROM   #stored_proc_info AS sp
-			JOIN #variable_info AS vi
-			ON (sp.proc_name = 'adhoc' AND sp.QueryHash = vi.QueryHash)
-			OR 	(sp.proc_name <> 'adhoc' AND sp.SqlHandle = vi.SqlHandle)
-			AND sp.variable_name = vi.variable_name )
-	BEGIN
-		RAISERROR(N'Updating variables', 0, 1) WITH NOWAIT;
-		UPDATE sp
-		SET sp.variable_datatype = vi.variable_datatype,
-			sp.compile_time_value = vi.compile_time_value
-		FROM   #stored_proc_info AS sp
-		JOIN #variable_info AS vi
-		ON (sp.proc_name = 'adhoc' AND sp.QueryHash = vi.QueryHash)
-		OR 	(sp.proc_name <> 'adhoc' AND sp.SqlHandle = vi.SqlHandle)
-		AND sp.variable_name = vi.variable_name
-		OPTION ( RECOMPILE );
-	END
-	ELSE
-	BEGIN
-		RAISERROR(N'Inserting variables', 0, 1) WITH NOWAIT;
-		INSERT #stored_proc_info ( SPID, SqlHandle, QueryHash, variable_name, variable_datatype, compile_time_value, proc_name )
-		SELECT vi.SPID, vi.SqlHandle, vi.QueryHash, vi.variable_name, vi.variable_datatype, vi.compile_time_value, vi.proc_name
-		FROM #variable_info AS vi
-		OPTION ( RECOMPILE );
-	END
+
+
+RAISERROR(N'Updating variables inserted procs', 0, 1) WITH NOWAIT;
+UPDATE sp
+SET sp.variable_datatype = vi.variable_datatype,
+	sp.compile_time_value = vi.compile_time_value
+FROM   #stored_proc_info AS sp
+JOIN #variable_info AS vi
+ON (sp.proc_name = 'adhoc' AND sp.QueryHash = vi.QueryHash)
+OR 	(sp.proc_name <> 'adhoc' AND sp.SqlHandle = vi.SqlHandle)
+AND sp.variable_name = vi.variable_name
+OPTION ( RECOMPILE );
+
+
+RAISERROR(N'Inserting variables for other procs', 0, 1) WITH NOWAIT;
+INSERT #stored_proc_info 
+		( SPID, SqlHandle, QueryHash, variable_name, variable_datatype, compile_time_value, proc_name )
+SELECT vi.SPID, vi.SqlHandle, vi.QueryHash, vi.variable_name, vi.variable_datatype, vi.compile_time_value, REPLACE(REPLACE(REPLACE(vi.proc_name, ')', ''), 'Statement (parent ', ''), 'Procedure or Function: ', '') AS proc_name
+FROM #variable_info AS vi
+WHERE NOT EXISTS
+(
+	SELECT * 
+	FROM   #stored_proc_info AS sp
+	WHERE (sp.proc_name = 'adhoc' AND sp.QueryHash = vi.QueryHash)
+	OR 	(sp.proc_name <> 'adhoc' AND sp.SqlHandle = vi.SqlHandle)
+)
+OPTION ( RECOMPILE );
+
 
 RAISERROR(N'Updating procs', 0, 1) WITH NOWAIT;
 UPDATE s
@@ -3219,7 +3220,9 @@ SET    s.variable_datatype = CASE WHEN s.variable_datatype LIKE '%(%)%' THEN
 													- CHARINDEX('(', s.compile_time_value)
 													)
 									WHEN variable_datatype NOT IN ('bit', 'tinyint', 'smallint', 'int', 'bigint') 
-										AND s.variable_datatype NOT LIKE '%binary%' THEN
+										AND s.variable_datatype NOT LIKE '%binary%' 
+										AND s.compile_time_value NOT LIKE 'N''%'''
+										AND s.compile_time_value NOT LIKE '''%''' THEN
 										QUOTENAME(compile_time_value, '''')
 									ELSE s.compile_time_value 
 							  END
@@ -3600,7 +3603,7 @@ SET    frequent_execution = CASE WHEN ExecutionsPerMinute > @execution_threshold
 	   low_cost_high_cpu = CASE WHEN QueryPlanCost < @ctp AND AverageCPU > 500. AND QueryPlanCost * 10 < AverageCPU THEN 1 END,
 	   is_spool_expensive = CASE WHEN QueryPlanCost > (@ctp / 2) AND index_spool_cost >= QueryPlanCost * .1 THEN 1 END,
 	   is_spool_more_rows = CASE WHEN index_spool_rows >= (AverageReturnedRows / ISNULL(NULLIF(ExecutionCount, 0), 1)) THEN 1 END,
-	   is_bad_estimate = CASE WHEN AverageReturnedRows > 0 AND (estimated_rows * 10000 < AverageReturnedRows OR estimated_rows > AverageReturnedRows * 10000) THEN 1 END
+	   is_bad_estimate = CASE WHEN AverageReturnedRows > 0 AND (estimated_rows * 1000 < AverageReturnedRows OR estimated_rows > AverageReturnedRows * 1000) THEN 1 END
 WHERE SPID = @@SPID
 OPTION (RECOMPILE) ;
 
@@ -4881,7 +4884,7 @@ BEGIN
                      100,
                      'Many Indexes Modified',
                      'Write Queries Are Hitting >= 5 Indexes',
-                     'No URL yet',
+                     'https://www.brentozar.com/blitzcache/many-indexes-modified/',
                      'This can cause lots of hidden I/O -- Run sp_BlitzIndex for more information.') ;
 
         IF EXISTS (SELECT 1/0
@@ -4894,7 +4897,7 @@ BEGIN
                      100,
                      'Plan Confusion',
                      'Row Level Security is in use',
-                     'No URL yet',
+                     'https://www.brentozar.com/blitzcache/row-level-security/',
                      'You may see a lot of confusing junk in your query plan.') ;
 
         IF EXISTS (SELECT 1/0
@@ -4907,7 +4910,7 @@ BEGIN
                      200,
                      'Spatial Abuse',
                      'You hit a Spatial Index',
-                     'No URL yet',
+                     'https://www.brentozar.com/blitzcache/spatial-indexes/',
                      'Purely informational.') ;
 
         IF EXISTS (SELECT 1/0
@@ -4920,7 +4923,7 @@ BEGIN
                      150,
                      'Index DML',
                      'Indexes were created or dropped',
-                     'No URL yet',
+                     'https://www.brentozar.com/blitzcache/index-dml/',
                      'This can cause recompiles and stuff.') ;
 
         IF EXISTS (SELECT 1/0
@@ -4933,7 +4936,7 @@ BEGIN
                      150,
                      'Table DML',
                      'Tables were created or dropped',
-                     'No URL yet',
+                     'https://www.brentozar.com/blitzcache/table-dml/',
                      'This can cause recompiles and stuff.') ;
 
         IF EXISTS (SELECT 1/0
@@ -4946,7 +4949,7 @@ BEGIN
                      150,
                      'Long Running Low CPU',
                      'You have a query that runs for much longer than it uses CPU',
-                     'No URL yet',
+                     'https://www.brentozar.com/blitzcache/long-running-low-cpu/',
                      'This can be a sign of blocking, linked servers, or poor client application code (ASYNC_NETWORK_IO).') ;
 
         IF EXISTS (SELECT 1/0
@@ -4959,7 +4962,7 @@ BEGIN
                      150,
                      'Low Cost Query With High CPU',
                      'You have a low cost query that uses a lot of CPU',
-                     'No URL yet',
+                     'https://www.brentozar.com/blitzcache/low-cost-high-cpu/',
                      'This can be a sign of functions or Dynamic SQL that calls black-box code.') ;
 
         IF EXISTS (SELECT 1/0
@@ -4972,7 +4975,7 @@ BEGIN
                      150,
                      'Biblical Statistics',
                      'Statistics used in queries are >7 days old with >100k modifications',
-                     'No URL yet',
+                     'https://www.brentozar.com/blitzcache/stale-statistics/',
                      'Ever heard of updating statistics?') ;
 
         IF EXISTS (SELECT 1/0
@@ -4985,7 +4988,7 @@ BEGIN
                      150,
                      'Adaptive joins',
                      'This is pretty cool -- you''re living in the future.',
-                     'No URL yet',
+                     'https://www.brentozar.com/blitzcache/adaptive-joins/',
                      'Joe Sack rules.') ;	
 
         IF EXISTS (SELECT 1/0
@@ -4998,7 +5001,7 @@ BEGIN
                      150,
                      'Expensive Index Spool',
                      'You have an index spool, this is usually a sign that there''s an index missing somewhere.',
-                     'No URL yet',
+                     'https://www.brentozar.com/blitzcache/eager-index-spools/',
                      'Check operator predicates and output for index definition guidance') ;	
 
         IF EXISTS (SELECT 1/0
@@ -5011,7 +5014,7 @@ BEGIN
                      150,
                      'Index Spools Many Rows',
                      'You have an index spool that spools more rows than the query returns',
-                     'No URL yet',
+                     'https://www.brentozar.com/blitzcache/eager-index-spools/',
                      'Check operator predicates and output for index definition guidance') ;
 					 
         IF EXISTS (SELECT 1/0
@@ -5024,7 +5027,7 @@ BEGIN
                      100,
                      'Potentially bad cardinality estimates',
                      'Estimated rows are different from average rows by a factor of 10000',
-                     'No URL yet',
+                     'https://www.brentozar.com/blitzcache/bad-estimates/',
                      'This may indicate a performance problem if mismatches occur regularly') ;	
 					 					 						 				 
         IF EXISTS (SELECT 1/0
@@ -5050,7 +5053,7 @@ BEGIN
 				200,
 				'Database Level Statistics',
 				'The database ' + sa.[Database] + ' last had a stats update on '  + CONVERT(NVARCHAR(10), CONVERT(DATE, MAX(sa.LastUpdate))) + ' and has ' + CONVERT(NVARCHAR(10), AVG(sa.ModificationCount)) + ' modifications on average.' AS [Finding],
-				'' AS URL,
+				'https://www.brentozar.com/blitzcache/stale-statistics/' AS URL,
 				'Consider updating statistics more frequently,' AS [Details]
 				FROM #stats_agg AS sa
 				GROUP BY sa.[Database]
