@@ -140,6 +140,7 @@ CREATE TABLE ##bou_BlitzCacheProcs (
         is_cursor BIT,
 		is_optimistic_cursor BIT,
 		is_forward_only_cursor BIT,
+		is_fast_forward_cursor BIT,
 		is_cursor_dynamic BIT,
         is_parallel BIT,
 		is_forced_serial BIT,
@@ -217,6 +218,9 @@ CREATE TABLE ##bou_BlitzCacheProcs (
 		is_paul_white_electric BIT,
 		is_row_goal BIT,
 		is_big_spills BIT,
+		is_mstvf BIT,
+		is_mm_join BIT,
+        is_nonsargable BIT,
 		implicit_conversion_info XML,
 		cached_execution_parameters XML,
 		missing_indexes XML,
@@ -264,8 +268,8 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE @Version VARCHAR(30);
-SET @Version = '6.2';
-SET @VersionDate = '20180201';
+SET @Version = '6.3';
+SET @VersionDate = '20180301';
 
 IF @Help = 1 PRINT '
 sp_BlitzCache from http://FirstResponderKit.org
@@ -957,6 +961,9 @@ BEGIN
 		is_paul_white_electric BIT,
 		is_row_goal BIT,
 		is_big_spills BIT,
+		is_mstvf BIT,
+		is_mm_join BIT,
+        is_nonsargable BIT,
 		implicit_conversion_info XML,
 		cached_execution_parameters XML,
 		missing_indexes XML,
@@ -2221,7 +2228,10 @@ RAISERROR(N'Attempting to aggregate stored proc info from separate statements', 
 		SUM(b.MinGrantKB) AS MinGrantKB,
 		SUM(b.MaxGrantKB) AS MaxGrantKB,
 		SUM(b.MinUsedGrantKB) AS MinUsedGrantKB,
-		SUM(b.MaxUsedGrantKB) AS MaxUsedGrantKB 
+		SUM(b.MaxUsedGrantKB) AS MaxUsedGrantKB,
+        SUM(b.MinSpills) AS MinSpills,
+        SUM(b.MaxSpills) AS MaxSpills,
+        SUM(b.TotalSpills) AS TotalSpills
     FROM ##bou_BlitzCacheProcs b
     WHERE b.SPID = @@SPID
 	AND b.QueryHash IS NOT NULL
@@ -2237,7 +2247,10 @@ UPDATE b
 		b.MinGrantKB		  = b2.MinGrantKB,
 		b.MaxGrantKB		  = b2.MaxGrantKB,
 		b.MinUsedGrantKB	  = b2.MinUsedGrantKB,
-		b.MaxUsedGrantKB      = b2.MaxUsedGrantKB
+		b.MaxUsedGrantKB      = b2.MaxUsedGrantKB,
+        b.MinSpills           = b2.MinSpills,
+        b.MaxSpills           = b2.MaxSpills,
+        b.TotalSpills         = b2.TotalSpills
 FROM ##bou_BlitzCacheProcs b
 JOIN agg b2
 ON b2.SqlHandle = b.SqlHandle
@@ -2832,6 +2845,18 @@ WHERE SPID = @@SPID
 AND n1.fn.exist('//p:CursorPlan/@ForwardOnly[.="true"]') = 1
 OPTION (RECOMPILE);
 
+RAISERROR(N'Checking if cursor is Fast Forward', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+UPDATE b
+SET b.is_fast_forward_cursor = 1
+FROM ##bou_BlitzCacheProcs b
+JOIN #statements AS qs
+ON b.SqlHandle = qs.SqlHandle
+CROSS APPLY qs.statement.nodes('/p:StmtCursor') AS n1(fn)
+WHERE SPID = @@SPID
+AND n1.fn.exist('//p:CursorPlan/@CursorActualType[.="FastForward"]') = 1
+OPTION (RECOMPILE);
+
 
 RAISERROR(N'Checking for Dynamic cursors', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
@@ -3002,7 +3027,7 @@ WHERE  r.relop.exist('/p:RelOp[@PhysicalOp="Index Spool" and @LogicalOp="Eager S
 )
 UPDATE b
 		SET b.index_spool_rows = sp.estimated_rows,
-			b.index_spool_cost = ((sp.estimated_io * sp.estimated_cpu) * CASE sp.estimated_rewinds WHEN 0 THEN 1 ELSE sp.estimated_rewinds END)
+			b.index_spool_cost = ((sp.estimated_io * sp.estimated_cpu) * CASE WHEN sp.estimated_rewinds < 1 THEN 1 ELSE sp.estimated_rewinds END)
 FROM ##bou_BlitzCacheProcs b
 JOIN spools sp
 ON sp.QueryHash = b.QueryHash
@@ -3230,6 +3255,25 @@ WHERE SPID = @@SPID
 OPTION (RECOMPILE);
 END;
 
+RAISERROR(N'Checking for MSTVFs', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+UPDATE b
+SET b.is_mstvf = 1
+FROM #relop AS r
+JOIN ##bou_BlitzCacheProcs AS b
+ON b.SqlHandle = r.SqlHandle
+WHERE  r.relop.exist('/p:RelOp[(@EstimateRows="100" or @EstimateRows="1") and @LogicalOp="Table-valued function"]') = 1
+OPTION (RECOMPILE);
+
+RAISERROR(N'Checking for many to many merge joins', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+UPDATE b
+SET b.is_mm_join = 1
+FROM #relop AS r
+JOIN ##bou_BlitzCacheProcs AS b
+ON b.SqlHandle = r.SqlHandle
+WHERE  r.relop.exist('/p:RelOp/p:Merge/@ManyToMany[.="1"]') = 1
+OPTION (RECOMPILE);
 
 RAISERROR(N'Is Paul White Electric?', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
@@ -3247,6 +3291,45 @@ JOIN is_paul_white_electric ipwe
 ON ipwe.SqlHandle = b.SqlHandle 
 WHERE b.SPID = @@SPID
 OPTION (RECOMPILE);
+
+RAISERROR(N'Checking for non-sargable predicates', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
+, nsarg
+    AS (   SELECT       r.QueryHash, 1 AS fn, 0 AS jo, 0 AS lk
+           FROM         #relop AS r
+           CROSS APPLY  r.relop.nodes('/p:RelOp/p:IndexScan/p:Predicate/p:ScalarOperator/p:Compare/p:ScalarOperator') AS ca(x)
+           WHERE        (   ca.x.exist('//p:ScalarOperator/p:Intrinsic/@FunctionName') = 1
+                            OR     ca.x.exist('//p:ScalarOperator/p:IF') = 1 )
+           UNION ALL
+           SELECT       r.QueryHash, 0 AS fn, 1 AS jo, 0 AS lk
+           FROM         #relop AS r
+           CROSS APPLY  r.relop.nodes('/p:RelOp//p:ScalarOperator') AS ca(x)
+           WHERE        r.relop.exist('/p:RelOp[contains(@LogicalOp, "Join")]') = 1
+                        AND ca.x.exist('//p:ScalarOperator[contains(@ScalarString, "Expr")]') = 1
+           UNION ALL
+           SELECT       r.QueryHash, 0 AS fn, 0 AS jo, 1 AS lk
+           FROM         #relop AS r
+           CROSS APPLY  r.relop.nodes('/p:RelOp/p:IndexScan/p:Predicate/p:ScalarOperator') AS ca(x)
+           CROSS APPLY  ca.x.nodes('//p:Const') AS co(x)
+           WHERE        ca.x.exist('//p:ScalarOperator/p:Intrinsic/@FunctionName[.="like"]') = 1
+                        AND (   (   co.x.value('substring(@ConstValue, 1, 1)', 'VARCHAR(100)') <> 'N'
+                                    AND co.x.value('substring(@ConstValue, 2, 1)', 'VARCHAR(100)') = '%' )
+                                OR (   co.x.value('substring(@ConstValue, 1, 1)', 'VARCHAR(100)') = 'N'
+                                       AND co.x.value('substring(@ConstValue, 3, 1)', 'VARCHAR(100)') = '%' ))),
+  d_nsarg
+    AS (   SELECT   DISTINCT
+                    nsarg.QueryHash
+           FROM     nsarg
+           WHERE    nsarg.fn = 1
+                    OR nsarg.jo = 1
+                    OR nsarg.lk = 1 )
+UPDATE  b
+SET     b.is_nonsargable = 1
+FROM    d_nsarg AS d
+JOIN    ##bou_BlitzCacheProcs AS b
+    ON b.QueryHash = d.QueryHash
+WHERE   b.SPID = @@SPID
+OPTION ( RECOMPILE );
 
 IF EXISTS ( SELECT 1 
 			FROM ##bou_BlitzCacheProcs AS bbcp 
@@ -3832,7 +3915,8 @@ SET    Warnings = SUBSTRING(
                   CASE WHEN is_cursor = 1 THEN ', Cursor' 
 							+ CASE WHEN is_optimistic_cursor = 1 THEN '; optimistic' ELSE '' END
 							+ CASE WHEN is_forward_only_cursor = 0 THEN '; not forward only' ELSE '' END
-							+ CASE WHEN is_cursor_dynamic = 1 THEN '; dynamic' ELSE '' END		
+							+ CASE WHEN is_cursor_dynamic = 1 THEN '; dynamic' ELSE '' END
+                            + CASE WHEN is_fast_forward_cursor = 1 THEN '; fast forward' ELSE '' END		
 				  ELSE '' END +
                   CASE WHEN is_parallel = 1 THEN ', Parallel' ELSE '' END +
                   CASE WHEN near_parallel = 1 THEN ', Nearly Parallel' ELSE '' END +
@@ -3879,7 +3963,10 @@ SET    Warnings = SUBSTRING(
 				  CASE WHEN is_bad_estimate = 1 THEN + ', Row estimate mismatch' ELSE '' END  +
 				  CASE WHEN is_paul_white_electric = 1 THEN ', SWITCH!' ELSE '' END + 
 				  CASE WHEN is_row_goal = 1 THEN ', Row Goals' ELSE '' END + 
-                  CASE WHEN is_big_spills = 1 THEN ', >500mb spills' ELSE '' END
+                  CASE WHEN is_big_spills = 1 THEN ', >500mb spills' ELSE '' END + 
+				  CASE WHEN is_mstvf = 1 THEN ', MSTVFs' ELSE '' END + 
+				  CASE WHEN is_mm_join = 1 THEN ', Many to Many Merge' ELSE '' END + 
+                  CASE WHEN is_nonsargable = 1 THEN ', non-SARGables' ELSE '' END
 				  , 2, 200000) 
 WHERE SPID = @@SPID
 OPTION (RECOMPILE);
@@ -3903,7 +3990,8 @@ SELECT  DISTINCT
                   CASE WHEN is_cursor = 1 THEN ', Cursor' 
 							+ CASE WHEN is_optimistic_cursor = 1 THEN '; optimistic' ELSE '' END
 							+ CASE WHEN is_forward_only_cursor = 0 THEN '; not forward only' ELSE '' END
-							+ CASE WHEN is_cursor_dynamic = 1 THEN '; dynamic' ELSE '' END								
+							+ CASE WHEN is_cursor_dynamic = 1 THEN '; dynamic' ELSE '' END
+                            + CASE WHEN is_fast_forward_cursor = 1 THEN '; fast forward' ELSE '' END								
 				  ELSE '' END +
                   CASE WHEN is_parallel = 1 THEN ', Parallel' ELSE '' END +
                   CASE WHEN near_parallel = 1 THEN ', Nearly Parallel' ELSE '' END +
@@ -3950,7 +4038,10 @@ SELECT  DISTINCT
 				  CASE WHEN is_bad_estimate = 1 THEN + ', Row estimate mismatch' ELSE '' END  +
 				  CASE WHEN is_paul_white_electric = 1 THEN ', SWITCH!' ELSE '' END + 
 				  CASE WHEN is_row_goal = 1 THEN ', Row Goals' ELSE '' END + 
-                  CASE WHEN is_big_spills = 1 THEN ', >500mb spills' ELSE '' END
+                  CASE WHEN is_big_spills = 1 THEN ', >500mb spills' ELSE '' END + 
+				  CASE WHEN is_mstvf = 1 THEN ', MSTVFs' ELSE '' END + 
+				  CASE WHEN is_mm_join = 1 THEN ', Many to Many Merge' ELSE '' END + 
+                  CASE WHEN is_nonsargable = 1 THEN ', non-SARGables' ELSE '' END
                   , 2, 200000) 
 FROM ##bou_BlitzCacheProcs b
 WHERE SPID = @@SPID
@@ -4418,7 +4509,10 @@ BEGIN
 				  CASE WHEN is_bad_estimate = 1 THEN + '', 56'' ELSE '''' END  +
 				  CASE WHEN is_paul_white_electric = 1 THEN '', 57'' ELSE '''' END + 
 				  CASE WHEN is_row_goal = 1 THEN '', 58'' ELSE '''' END + 
-                  CASE WHEN is_big_spills = 1 THEN '', 59'' ELSE '''' END
+                  CASE WHEN is_big_spills = 1 THEN '', 59'' ELSE '''' END +
+				  CASE WHEN is_mstvf = 1 THEN '', 60'' ELSE '''' END + 
+				  CASE WHEN is_mm_join = 1 THEN '', 61'' ELSE '''' END  + 
+                  CASE WHEN is_nonsargable = 1 THEN '', 62'' ELSE '''' END
 				  , 2, 200000) AS opserver_warning , ' + @nl ;
     END;
     
@@ -4632,6 +4726,20 @@ BEGIN
                     'Dynamic Cursors',
                     'http://brentozar.com/blitzcache/cursors-found-slow-queries/',
                     'Dynamic Cursors inhibit parallelism!.');
+
+        IF EXISTS (SELECT 1/0
+                   FROM   ##bou_BlitzCacheProcs
+                   WHERE  is_cursor = 1
+				   AND is_fast_forward_cursor = 1
+				   AND SPID = @@SPID)
+            INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
+            VALUES (@@SPID,
+                    4,
+                    200,
+                    'Cursors',
+                    'Fast Forward Cursors',
+                    'http://brentozar.com/blitzcache/cursors-found-slow-queries/',
+                    'Fast forward cursors inhibit parallelism!.');
 
         IF EXISTS (SELECT 1/0
                    FROM   ##bou_BlitzCacheProcs
@@ -5307,6 +5415,44 @@ BEGIN
 
 			END; 
 
+        IF EXISTS (SELECT 1/0
+                    FROM   ##bou_BlitzCacheProcs p
+                    WHERE  p.is_mstvf = 1
+  					)
+             INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
+             VALUES (@@SPID,
+                     60,
+                     100,
+                     'MSTVFs',
+                     'These have many of the same problems scalar UDFs have',
+                     'http://brentozar.com/blitzcache/tvf-join/',
+					 'Execution plans have been found that join to table valued functions (TVFs). TVFs produce inaccurate estimates of the number of rows returned and can lead to any number of query plan problems.');	
+
+        IF EXISTS (SELECT 1/0
+                    FROM   ##bou_BlitzCacheProcs p
+                    WHERE  p.is_mm_join = 1
+  					)
+             INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
+             VALUES (@@SPID,
+                     61,
+                     100,
+                     'Many to Many Merge',
+                     'These use secret worktables that could be doing lots of reads',
+                     'link to blog post when published',
+					 'Occurs when join inputs aren''t known to be unique. Can be really bad when parallel.');	
+
+        IF EXISTS (SELECT 1/0
+                    FROM   ##bou_BlitzCacheProcs p
+                    WHERE  p.is_nonsargable = 1
+  					)
+             INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
+             VALUES (@@SPID,
+                     62,
+                     50,
+                     'Non-SARGable queries',
+                     'Queries may be using',
+                     'link to blog post when published',
+					 'Occurs when join inputs aren''t known to be unique. Can be really bad when parallel.');	
 
         IF EXISTS (SELECT 1/0
                    FROM   #plan_creation p

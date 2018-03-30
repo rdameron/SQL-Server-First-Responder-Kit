@@ -32,8 +32,8 @@ AS
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 	DECLARE @Version VARCHAR(30);
-	SET @Version = '6.2';
-	SET @VersionDate = '20180201';
+	SET @Version = '6.3';
+	SET @VersionDate = '20180301';
 	SET @OutputType = UPPER(@OutputType);
 
 	IF @Help = 1 PRINT '
@@ -2682,6 +2682,37 @@ AS
 
 				IF NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
+								WHERE   DatabaseName IS NULL AND CheckID = 213 )
+					BEGIN
+
+						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 213) WITH NOWAIT;
+
+						INSERT  INTO #BlitzResults
+								( CheckID ,
+								  DatabaseName ,
+								  Priority ,
+								  FindingsGroup ,
+								  Finding ,
+								  URL ,
+								  Details
+								)
+								SELECT  213 AS CheckID ,
+										[name] AS DatabaseName ,
+										230 AS Priority ,
+										'Security' AS FindingsGroup ,
+										'Database Owner is Unknown' AS Finding ,
+										'' AS URL ,
+										( 'Database name: ' + [name] + '   '
+										  + 'Owner name: ' + ISNULL(SUSER_SNAME(owner_sid),'~~ UNKNOWN ~~') ) AS Details
+								FROM    sys.databases
+								WHERE   SUSER_SNAME(owner_sid) is NULL
+										AND name NOT IN ( SELECT DISTINCT DatabaseName
+														  FROM    #SkipChecks 
+														  WHERE CheckID IS NULL OR CheckID = 213);
+					END;
+
+				IF NOT EXISTS ( SELECT  1
+								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 57 )
 					BEGIN
 
@@ -3256,7 +3287,9 @@ AS
 										WHERE   DatabaseName IS NULL AND CheckID = 128 )
 							BEGIN
 
-							IF (@ProductVersionMajor = 12 AND @ProductVersionMinor < 5000) OR
+							IF (@ProductVersionMajor = 14 AND @ProductVersionMinor < 1000) OR
+							   (@ProductVersionMajor = 13 AND @ProductVersionMinor < 4001) OR
+							   (@ProductVersionMajor = 12 AND @ProductVersionMinor < 5000) OR
 							   (@ProductVersionMajor = 11 AND @ProductVersionMinor < 6020) OR
 							   (@ProductVersionMajor = 10.5 AND @ProductVersionMinor < 6000) OR
 							   (@ProductVersionMajor = 10 AND @ProductVersionMinor < 6000) OR
@@ -4254,7 +4287,7 @@ IF @ProductVersionMajor >= 10
 							FROM sys.dm_os_loaded_modules
 							WHERE UPPER(name) LIKE UPPER('%\ENTAPI.DLL') /* McAfee VirusScan Enterprise */
 							OR UPPER(name) LIKE UPPER('%\HIPI.DLL') OR UPPER(name) LIKE UPPER('%\HcSQL.dll') OR UPPER(name) LIKE UPPER('%\HcApi.dll') OR UPPER(name) LIKE UPPER('%\HcThe.dll') /* McAfee Host Intrusion */
-							OR UPPER(name) LIKE UPPER('%\SOPHOS_DETOURED.DLL') OR UPPER(name) LIKE UPPER('%\SOPHOS_DETOURED_x64.DLL') OR UPPER(name) LIKE UPPER('%\SWI_IFSLSP_64.dll') /* Sophos AV */
+							OR UPPER(name) LIKE UPPER('%\SOPHOS_DETOURED.DLL') OR UPPER(name) LIKE UPPER('%\SOPHOS_DETOURED_x64.DLL') OR UPPER(name) LIKE UPPER('%\SWI_IFSLSP_64.dll') OR UPPER(name) LIKE UPPER('%\SOPHOS~%.dll') /* Sophos AV */
 							OR UPPER(name) LIKE UPPER('%\PIOLEDB.DLL') OR UPPER(name) LIKE UPPER('%\PISDK.DLL'); /* OSISoft PI data access */
 
 					END;
@@ -4520,7 +4553,7 @@ IF @ProductVersionMajor >= 10
 							AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 199) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 203) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -4585,7 +4618,7 @@ IF @ProductVersionMajor >= 10
 							AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 200) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 207) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -4616,7 +4649,7 @@ IF @ProductVersionMajor >= 10
 							AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 201) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 208) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -4647,7 +4680,7 @@ IF @ProductVersionMajor >= 10
 							AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 202) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 205) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -4678,7 +4711,7 @@ IF @ProductVersionMajor >= 10
 							AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 203) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 209) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -4708,7 +4741,7 @@ IF @ProductVersionMajor >= 10
 							AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 204) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 210) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -4743,7 +4776,7 @@ IF @ProductVersionMajor >= 10
 						AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 205) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 206) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -4771,6 +4804,48 @@ IF @ProductVersionMajor >= 10
 						HAVING AVG(DATEDIFF(SECOND, t.StartTime, t.EndTime)) > 5;
 				
 				END;
+
+			IF NOT EXISTS ( SELECT  1
+								FROM    #SkipChecks
+								WHERE   DatabaseName IS NULL AND CheckID = 215 )
+						AND @TraceFileIssue = 0
+					BEGIN
+						
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 215) WITH NOWAIT
+						
+						  INSERT    INTO [#BlitzResults]
+									( [CheckID] ,
+									  [Priority] ,
+									  [FindingsGroup] ,
+									  [Finding] ,
+                                      [DatabaseName] ,
+									  [URL] ,
+									  [Details] )
+
+						SELECT	215 AS CheckID ,
+								100 AS Priority ,
+								'Performance' AS FindingsGroup ,
+								'Implicit Transactions' AS Finding ,
+								DB_NAME(s.database_id) AS DatabaseName,
+                                'https://www.brentozar.com/go/ImplicitTransactions/' AS URL ,
+								N'The database ' +
+                                DB_NAME(s.database_id)
+                                + ' has '
+                                + CONVERT(NVARCHAR(20), COUNT_BIG(*))
+                                + ' open implicit transactions '
+                                + ' with an oldest begin time of '
+                                + CONVERT(NVARCHAR(30), MIN(tat.transaction_begin_time)) AS details
+                        FROM    sys.dm_tran_active_transactions AS tat
+                        LEFT JOIN sys.dm_tran_session_transactions AS tst
+                        ON tst.transaction_id = tat.transaction_id
+                        LEFT JOIN sys.dm_exec_sessions AS s
+                        ON s.session_id = tst.session_id
+                        WHERE tat.name = 'implicit_transaction'
+                        GROUP BY DB_NAME(s.database_id), transaction_type, transaction_state
+				
+				END;
+
+
 
 				IF @CheckUserDatabaseObjects = 1
 					BEGIN
@@ -4825,14 +4900,14 @@ IF @ProductVersionMajor >= 10
 			                            URL,
 			                            Details)
 		                              SELECT TOP 1 163,
-		                              ''?'',
+		                              N''?'',
 		                              200,
 		                              ''Performance'',
 		                              ''Query Store Disabled'',
 		                              ''https://BrentOzar.com/go/querystore'',
 		                              (''The new SQL Server 2016 Query Store feature has not been enabled on this database.'')
 		                              FROM [?].sys.database_query_store_options WHERE desired_state = 0
-									  AND ''?'' NOT IN (''master'', ''model'', ''msdb'', ''tempdb'', ''DWConfiguration'', ''DWDiagnostics'', ''DWQueue'', ''ReportServer'', ''ReportServerTempDB'') OPTION (RECOMPILE)';
+									  AND N''?'' NOT IN (''master'', ''model'', ''msdb'', ''tempdb'', ''DWConfiguration'', ''DWDiagnostics'', ''DWQueue'', ''ReportServer'', ''ReportServerTempDB'') OPTION (RECOMPILE)';
 							END;
 
 						
@@ -4888,14 +4963,14 @@ IF @ProductVersionMajor >= 10
 		                              URL,
 		                              Details)
 		                              SELECT 41,
-		                              ''?'',
+		                              N''?'',
 		                              170,
 		                              ''File Configuration'',
 		                              ''Multiple Log Files on One Drive'',
 		                              ''https://BrentOzar.com/go/manylogs'',
 		                              (''The ['' + DB_NAME() + ''] database has multiple log files on the '' + LEFT(physical_name, 1) + '' drive. This is not a performance booster because log file access is sequential, not parallel.'')
 		                              FROM [?].sys.database_files WHERE type_desc = ''LOG''
-			                            AND ''?'' <> ''[tempdb]''
+			                            AND N''?'' <> ''[tempdb]''
 		                              GROUP BY LEFT(physical_name, 1)
 		                              HAVING COUNT(*) > 1 OPTION (RECOMPILE);';
 					        END;
@@ -4917,7 +4992,7 @@ IF @ProductVersionMajor >= 10
 			                            URL,
 			                            Details)
 			                            SELECT DISTINCT 42,
-			                            ''?'',
+			                            N''?'',
 			                            170,
 			                            ''File Configuration'',
 			                            ''Uneven File Growth Settings in One Filegroup'',
@@ -4945,7 +5020,7 @@ IF @ProductVersionMajor >= 10
 		                                Finding,
 		                                URL, Details)
 		                                SELECT  DISTINCT 82 AS CheckID,
-		                                ''?'' as DatabaseName,
+		                                N''?'' as DatabaseName,
 		                                170 AS Priority,
 		                                ''File Configuration'' AS FindingsGroup,
 		                                ''File growth set to percent'',
@@ -4972,7 +5047,7 @@ IF @ProductVersionMajor >= 10
 		                                Finding,
 		                                URL, Details)
 		                                SELECT  DISTINCT 158 AS CheckID,
-		                                ''?'' as DatabaseName,
+		                                N''?'' as DatabaseName,
 		                                170 AS Priority,
 		                                ''File Configuration'' AS FindingsGroup,
 		                                ''File growth set to 1MB'',
@@ -5085,7 +5160,7 @@ IF @ProductVersionMajor >= 10
 			URL,
 			Details)
 			SELECT 32,
-			''?'',
+			N''?'',
 			150,
 			''Performance'',
 			''Triggers on Tables'',
@@ -5113,7 +5188,7 @@ IF @ProductVersionMajor >= 10
 			URL,
 			Details)
 		  SELECT DISTINCT 38,
-		  ''?'',
+		  N''?'',
 		  110,
 		  ''Performance'',
 		  ''Active Tables Without Clustered Indexes'',
@@ -5121,7 +5196,7 @@ IF @ProductVersionMajor >= 10
 		  (''The ['' + DB_NAME() + ''] database has heaps - tables without a clustered index - that are being actively queried.'')
 		  FROM [?].sys.indexes i INNER JOIN [?].sys.objects o ON i.object_id = o.object_id
 		  INNER JOIN [?].sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
-		  INNER JOIN sys.databases sd ON sd.name = ''?''
+		  INNER JOIN sys.databases sd ON sd.name = N''?''
 		  LEFT OUTER JOIN [?].sys.dm_db_index_usage_stats ius ON i.object_id = ius.object_id AND i.index_id = ius.index_id AND ius.database_id = sd.database_id
 		  WHERE i.type_desc = ''HEAP'' AND COALESCE(ius.user_seeks, ius.user_scans, ius.user_lookups, ius.user_updates) IS NOT NULL
 		  AND sd.name <> ''tempdb'' AND sd.name <> ''DWDiagnostics'' AND o.is_ms_shipped = 0 AND o.type <> ''S'' OPTION (RECOMPILE)';
@@ -5145,7 +5220,7 @@ IF @ProductVersionMajor >= 10
 			URL,
 			Details)
 		  SELECT DISTINCT 164,
-		  ''?'',
+		  N''?'',
 		  20,
 		  ''Reliability'',
 		  ''Plan Guides Failing'',
@@ -5171,7 +5246,7 @@ IF @ProductVersionMajor >= 10
 			URL,
 			Details)
 		  SELECT DISTINCT 39,
-		  ''?'',
+		  N''?'',
 		  150,
 		  ''Performance'',
 		  ''Inactive Tables Without Clustered Indexes'',
@@ -5179,7 +5254,7 @@ IF @ProductVersionMajor >= 10
 		  (''The ['' + DB_NAME() + ''] database has heaps - tables without a clustered index - that have not been queried since the last restart.  These may be backup tables carelessly left behind.'')
 		  FROM [?].sys.indexes i INNER JOIN [?].sys.objects o ON i.object_id = o.object_id
 		  INNER JOIN [?].sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
-		  INNER JOIN sys.databases sd ON sd.name = ''?''
+		  INNER JOIN sys.databases sd ON sd.name = N''?''
 		  LEFT OUTER JOIN [?].sys.dm_db_index_usage_stats ius ON i.object_id = ius.object_id AND i.index_id = ius.index_id AND ius.database_id = sd.database_id
 		  WHERE i.type_desc = ''HEAP'' AND COALESCE(ius.user_seeks, ius.user_scans, ius.user_lookups, ius.user_updates) IS NULL
 		  AND sd.name <> ''tempdb'' AND sd.name <> ''DWDiagnostics'' AND o.is_ms_shipped = 0 AND o.type <> ''S'' OPTION (RECOMPILE)';
@@ -5202,7 +5277,7 @@ IF @ProductVersionMajor >= 10
 				URL,
 				Details)
 		  SELECT 46,
-		  ''?'',
+		  N''?'',
 		  150,
 		  ''Performance'',
 		  ''Leftover Fake Indexes From Wizards'',
@@ -5229,7 +5304,7 @@ IF @ProductVersionMajor >= 10
 				URL,
 				Details)
 		  SELECT 47,
-		  ''?'',
+		  N''?'',
 		  100,
 		  ''Performance'',
 		  ''Indexes Disabled'',
@@ -5256,14 +5331,14 @@ IF @ProductVersionMajor >= 10
 				URL,
 				Details)
 		  SELECT DISTINCT 48,
-		  ''?'',
+		  N''?'',
 		  150,
 		  ''Performance'',
 		  ''Foreign Keys Not Trusted'',
 		  ''https://BrentOzar.com/go/trust'',
 		  (''The ['' + DB_NAME() + ''] database has foreign keys that were probably disabled, data was changed, and then the key was enabled again.  Simply enabling the key is not enough for the optimizer to use this key - we have to alter the table using the WITH CHECK CHECK CONSTRAINT parameter.'')
 		  from [?].sys.foreign_keys i INNER JOIN [?].sys.objects o ON i.parent_object_id = o.object_id INNER JOIN [?].sys.schemas s ON o.schema_id = s.schema_id
-		  WHERE i.is_not_trusted = 1 AND i.is_not_for_replication = 0 AND i.is_disabled = 0 AND ''?'' NOT IN (''master'', ''model'', ''msdb'', ''ReportServer'', ''ReportServerTempDB'') OPTION (RECOMPILE);';
+		  WHERE i.is_not_trusted = 1 AND i.is_not_for_replication = 0 AND i.is_disabled = 0 AND N''?'' NOT IN (''master'', ''model'', ''msdb'', ''ReportServer'', ''ReportServerTempDB'') OPTION (RECOMPILE);';
 							END;
 
 						IF NOT EXISTS ( SELECT  1
@@ -5283,7 +5358,7 @@ IF @ProductVersionMajor >= 10
 				URL,
 				Details)
 		  SELECT 56,
-		  ''?'',
+		  N''?'',
 		  150,
 		  ''Performance'',
 		  ''Check Constraint Not Trusted'',
@@ -5314,7 +5389,7 @@ IF @ProductVersionMajor >= 10
 				  URL,
 				  Details)
 			SELECT TOP 1 95 AS CheckID,
-			''?'' as DatabaseName,
+			N''?'' as DatabaseName,
 			110 AS Priority,
 			''Performance'' AS FindingsGroup,
 			''Plan Guides Enabled'' AS Finding,
@@ -5341,7 +5416,7 @@ IF @ProductVersionMajor >= 10
 				URL,
 				Details)
 		  SELECT 60 AS CheckID,
-		  ''?'' as DatabaseName,
+		  N''?'' as DatabaseName,
 		  100 AS Priority,
 		  ''Performance'' AS FindingsGroup,
 		  ''Fill Factor Changed'',
@@ -5465,7 +5540,7 @@ IF @ProductVersionMajor >= 10
 									URL,
 									Details)
 							  SELECT DISTINCT 113,
-							  ''?'',
+							  N''?'',
 							  50,
 							  ''Reliability'',
 							  ''Full Text Indexes Not Updating'',
@@ -5491,7 +5566,7 @@ IF @ProductVersionMajor >= 10
 				URL,
 				Details)
 		  SELECT 115,
-		  ''?'',
+		  N''?'',
 		  110,
 		  ''Performance'',
 		  ''Parallelism Rocket Surgery'',
@@ -5523,7 +5598,7 @@ IF @ProductVersionMajor >= 10
 													URL,
 													Details)
 												SELECT TOP 1 122,
-												''?'',
+												N''?'',
 												200,
 												''Performance'',
 												''User-Created Statistics In Place'',
@@ -5543,7 +5618,7 @@ IF @ProductVersionMajor >= 10
 													URL,
 													Details)
 												SELECT 122,
-												''?'',
+												N''?'',
 												200,
 												''Performance'',
 												''User-Created Statistics In Place'',
@@ -6985,6 +7060,34 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 									''Type: ('' + virtual_machine_type_desc + '')'' AS Details
 									FROM sys.dm_os_sys_info
 									WHERE virtual_machine_type <> 0 OPTION (RECOMPILE);';
+								
+								IF @Debug = 2 AND @StringToExecute IS NOT NULL PRINT @StringToExecute;
+								IF @Debug = 2 AND @StringToExecute IS NULL PRINT '@StringToExecute has gone NULL, for some reason.';
+								
+								EXECUTE(@StringToExecute);
+							END;
+
+						IF NOT EXISTS ( SELECT  1
+										FROM    #SkipChecks
+										WHERE   DatabaseName IS NULL AND CheckID = 214 )
+							AND EXISTS ( SELECT *
+										 FROM   sys.all_objects o
+												INNER JOIN sys.all_columns c ON o.object_id = c.object_id
+										 WHERE  o.name = 'dm_os_sys_info'
+												AND c.name = 'container_type_desc' )
+							BEGIN
+								
+								IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 214) WITH NOWAIT;
+								
+								SET @StringToExecute = 'INSERT INTO #BlitzResults (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+									SELECT 214 AS CheckID,
+									250 AS Priority,
+									''Server Info'' AS FindingsGroup,
+									''Container'' AS Finding,
+									''https://BrentOzar.com/go/virtual'' AS URL,
+									''Type: ('' + container_type_desc + '')'' AS Details
+									FROM sys.dm_os_sys_info
+									WHERE container_type_desc <> ''NONE'' OPTION (RECOMPILE);';
 								
 								IF @Debug = 2 AND @StringToExecute IS NOT NULL PRINT @StringToExecute;
 								IF @Debug = 2 AND @StringToExecute IS NULL PRINT '@StringToExecute has gone NULL, for some reason.';

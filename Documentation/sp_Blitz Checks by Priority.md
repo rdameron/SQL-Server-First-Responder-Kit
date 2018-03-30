@@ -6,8 +6,8 @@ Before adding a new check, make sure to add a Github issue for it first, and hav
 
 If you want to change anything about a check - the priority, finding, URL, or ID - open a Github issue first. The relevant scripts have to be updated too.
 
-CURRENT HIGH CHECKID: 212
-If you want to add a new one, start at 213
+CURRENT HIGH CHECKID: 215
+If you want to add a new one, start at 216
 
 | Priority | FindingsGroup | Finding | URL | CheckID |
 |----------|-----------------------------|---------------------------------------------------------|------------------------------------------------------------------------|----------|
@@ -85,6 +85,7 @@ If you want to add a new one, start at 213
 | 100 | Performance | Single-Use Plans in Procedure Cache | https://www.BrentOzar.com/go/single | 35 |
 | 100 | Performance | Stored Procedure WITH RECOMPILE | https://www.BrentOzar.com/go/recompile | 78 |
 | 100 | Performance | Unusual SQL Server Edition | https://www.BrentOzar.com/go/workgroup | 97 |
+| 100 | Performance | Implicit Transactions | https://www.brentozar.com/go/ImplicitTransactions/ | 215 |
 | 110 | Performance | Active Tables Without Clustered Indexes | https://www.BrentOzar.com/go/heaps | 38 |
 | 110 | Performance | Auto-Create Stats Disabled | https://www.BrentOzar.com/go/acs | 15 |
 | 110 | Performance | Auto-Update Stats Disabled | https://www.BrentOzar.com/go/aus | 16 |
@@ -254,6 +255,7 @@ If you want to add a new one, start at 213
 | 210 | Non-Default Database Scoped Config | Query Optimizer Hotfixes | https://www.BrentOzar.com/go/dbscope | 197 |
 | 230 | Security | Control Server Permissions | https://www.BrentOzar.com/go/sa | 104 |
 | 230 | Security | Database Owner <> SA | https://www.BrentOzar.com/go/owndb | 55 |
+| 230 | Security | Database Owner is Unknown |  | 213 |
 | 230 | Security | Elevated Permissions on a Database | https://www.BrentOzar.com/go/elevated | 86 |
 | 230 | Security | Endpoints Owned by Users | https://www.BrentOzar.com/go/owners | 187 |
 | 230 | Security | Jobs Owned By Users | https://www.BrentOzar.com/go/owners | 6 |
@@ -268,6 +270,7 @@ If you want to add a new one, start at 213
 | 250 | Informational | SQL Server Agent is running under an NT Service account | https://www.BrentOzar.com/go/setup | 170 |
 | 250 | Informational | SQL Server is running under an NT Service account | https://www.BrentOzar.com/go/setup | 169 |
 | 250 | Server Info | Agent is Currently Offline |  | 167 |
+| 250 | Server Info | Container | https://www.BrentOzar.com/go/virtual | 214 |
 | 250 | Server Info | Default Trace Contents | https://www.BrentOzar.com/go/trace | 106 |
 | 250 | Server Info | Drive Space |  | 92 |
 | 250 | Server Info | Full-text Filter Daemon is Currently Offline |  | 168 |
