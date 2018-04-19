@@ -39,8 +39,8 @@ BEGIN
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 DECLARE @Version VARCHAR(30);
-SET @Version = '6.3';
-SET @VersionDate = '20180301';
+SET @Version = '6.4';
+SET @VersionDate = '20180401';
 
 
 IF @Help = 1 PRINT '
@@ -1490,31 +1490,43 @@ BEGIN
 
 
     /*Query Problems - Clients using implicit transactions */
-    IF @Seconds > 0
-    INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, StartTime, LoginName, NTUserName, ProgramName, HostName, DatabaseID, DatabaseName, QueryText, OpenTransactionCount)
-    SELECT  37 AS CheckId,
-            50 AS Priotity,
-            'Implicit Transactions' AS FindingsGroup,
-            'Queries were found running using implicit transactions',
-            'https://www.brentozar.com/go/ImplicitTransactions/' AS URL,
-            'Database: ' + DB_NAME(s.database_id) + @LineFeed + 'Host: ' + s.[host_name] + @LineFeed + 'Program: ' + s.[program_name]   + @LineFeed + CONVERT(VARCHAR(10), s.open_transaction_count) + ' open transactions since' + CAST  (tat.transaction_begin_time AS NVARCHAR(100)) + '. ' AS Details,
-            'Check client configuration options' AS HowToStopit,
-            tat.transaction_begin_time,
-            s.login_name,
-            s.nt_user_name,
-            s.program_name,
-            s.host_name,
-            s.database_id,
-            DB_NAME(s.database_id) AS DatabaseName,
-            NULL AS Querytext,
-            s.open_transaction_count AS OpenTransactionCount
-    FROM    sys.dm_tran_active_transactions AS tat
-    LEFT JOIN sys.dm_tran_session_transactions AS tst
-    ON tst.transaction_id = tat.transaction_id
-    LEFT JOIN sys.dm_exec_sessions AS s
-    ON s.session_id = tst.session_id
-    WHERE tat.name = 'implicit_transaction';
-
+    IF @Seconds > 0 
+		AND ( @@VERSION NOT LIKE 'Microsoft SQL Server 2005%'
+		AND	  @@VERSION NOT LIKE 'Microsoft SQL Server 2008%'
+		AND	  @@VERSION NOT LIKE 'Microsoft SQL Server 2008 R2%' )
+     BEGIN
+        SET @StringToExecute = N'INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, StartTime, LoginName, NTUserName, ProgramName, HostName, DatabaseID, DatabaseName, QueryText, OpenTransactionCount)
+		SELECT  37 AS CheckId,
+		        50 AS Priority,
+		        ''Implicit Transactions'' AS FindingsGroup,
+		        ''Queries were found running using implicit transactions'',
+		        ''https://www.brentozar.com/go/ImplicitTransactions/'' AS URL,
+		        ''Database: '' + DB_NAME(s.database_id)  + '' '' + 
+				''Host: '' + s.[host_name]  + '' '' + 
+				''Program: '' + s.[program_name]  + '' '' + 
+				CONVERT(NVARCHAR(10), s.open_transaction_count) + 
+				'' open transactions since: '' + 
+				CONVERT(NVARCHAR(30), tat.transaction_begin_time) + ''. '' 
+					AS Details,
+				''Check client configuration options'' AS HowToStopit,
+		        tat.transaction_begin_time,
+		        s.login_name,
+		        s.nt_user_name,
+		        s.program_name,
+		        s.host_name,
+		        s.database_id,
+		        DB_NAME(s.database_id) AS DatabaseName,
+		        NULL AS Querytext,
+		        s.open_transaction_count AS OpenTransactionCount
+		FROM    sys.dm_tran_active_transactions AS tat
+		LEFT JOIN sys.dm_tran_session_transactions AS tst
+		ON tst.transaction_id = tat.transaction_id
+		LEFT JOIN sys.dm_exec_sessions AS s
+		ON s.session_id = tst.session_id
+		WHERE tat.name = ''implicit_transaction'';
+		'
+		EXECUTE sp_executesql @StringToExecute;
+    END;
 
     /* Query Problems - Query Rolling Back - CheckID 9 */
     IF @Seconds > 0
@@ -2026,7 +2038,7 @@ BEGIN
         200 AS Priority,
         'Wait Stats' AS FindingGroup,
         wNow.wait_type AS Finding, /* IF YOU CHANGE THIS, STUFF WILL BREAK. Other checks look for wait type names in the Finding field. See checks 11, 12 as example. */
-        N'http://www.brentozar.com/sql/wait-stats/#' + wNow.wait_type AS URL,
+        N'https://www.sqlskills.com/help/waits/' + LOWER(wNow.wait_type) + '/' AS URL,
         'For ' + CAST(((wNow.wait_time_ms - COALESCE(wBase.wait_time_ms,0)) / 1000) AS NVARCHAR(100)) + ' seconds over the last ' + CASE @Seconds WHEN 0 THEN (CAST(DATEDIFF(dd,@StartSampleTime,@FinishSampleTime) AS NVARCHAR(10)) + ' days') ELSE (CAST(@Seconds AS NVARCHAR(10)) + ' seconds') END + ', SQL Server was waiting on this particular bottleneck.' + @LineFeed + @LineFeed AS Details,
         'See the URL for more details on how to mitigate this wait type.' AS HowToStopIt,
         ((wNow.wait_time_ms - COALESCE(wBase.wait_time_ms,0)) / 1000) AS DetailsInt
@@ -3301,7 +3313,7 @@ BEGIN
                         CAST((wd2.wait_time_ms-wd1.wait_time_ms)/
                             (1.0*(wd2.waiting_tasks_count - wd1.waiting_tasks_count)) AS NUMERIC(12,1))
                     ELSE 0 END AS [Avg ms Per Wait],
-                    N'http://www.brentozar.com/sql/wait-stats/#' + wd1.wait_type AS URL
+                    N'https://www.sqlskills.com/help/waits/' + LOWER(wd1.wait_type) + '/' AS URL
                 FROM  max_batch b
                 JOIN #WaitStats wd2 ON
                     wd2.SampleTime =b.SampleTime
@@ -3342,7 +3354,7 @@ BEGIN
                         CAST((wd2.wait_time_ms-wd1.wait_time_ms)/
                             (1.0*(wd2.waiting_tasks_count - wd1.waiting_tasks_count)) AS NUMERIC(12,1))
                     ELSE 0 END AS [Avg ms Per Wait],
-                    N'http://www.brentozar.com/sql/wait-stats/#' + wd1.wait_type AS URL
+                    N'https://www.sqlskills.com/help/waits/' + LOWER(wd1.wait_type) + '/' AS URL
                 FROM  max_batch b
                 JOIN #WaitStats wd2 ON
                     wd2.SampleTime =b.SampleTime
