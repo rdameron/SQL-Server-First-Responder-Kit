@@ -32,8 +32,8 @@ AS
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 	DECLARE @Version VARCHAR(30);
-	SET @Version = '6.4';
-	SET @VersionDate = '20180401';
+	SET @Version = '6.5';
+	SET @VersionDate = '20180501';
 	SET @OutputType = UPPER(@OutputType);
 
 	IF @Help = 1 PRINT '
@@ -3130,35 +3130,6 @@ AS
 									AND SUM([wait_time_ms]) > 60000;
 						END;
 
-					IF @ProductVersionMajor >= 11 AND NOT EXISTS ( SELECT 1
-										 FROM   #SkipChecks
-										 WHERE  DatabaseName IS NULL AND CheckID = 162 )
-						BEGIN
-							
-							IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 162) WITH NOWAIT;
-
-							INSERT  INTO #BlitzResults
-									( CheckID ,
-									  Priority ,
-									  FindingsGroup ,
-									  Finding ,
-									  URL ,
-									  Details
-									)
-									SELECT  162 AS CheckID ,
-											50 AS Priority ,
-											'Performance' AS FindingGroup ,
-											'Poison Wait Detected: CMEMTHREAD & NUMA'  AS Finding ,
-											'https://BrentOzar.com/go/poison' AS URL ,
-											CONVERT(VARCHAR(10), (SUM([wait_time_ms]) / 1000) / 86400) + ':' + CONVERT(VARCHAR(20), DATEADD(s, (SUM([wait_time_ms]) / 1000), 0), 108) + ' of this wait have been recorded. In servers with over 8 cores per NUMA node, when CMEMTHREAD waits are a bottleneck, trace flag 8048 may be needed.'
-									FROM sys.dm_os_nodes n
-									INNER JOIN sys.[dm_os_wait_stats] w ON w.wait_type = 'CMEMTHREAD'
-									WHERE n.node_id = 0 AND n.online_scheduler_count >= 8
-										AND EXISTS (SELECT * FROM sys.dm_os_nodes WHERE node_id > 0 AND node_state_desc NOT LIKE '%DAC')
-									GROUP BY w.wait_type
-								    HAVING SUM([wait_time_ms]) > (SELECT 5000 * datediff(HH,create_date,CURRENT_TIMESTAMP) AS hours_since_startup FROM sys.databases WHERE name='tempdb')
-									AND SUM([wait_time_ms]) > 60000;
-						END;
 
 						IF NOT EXISTS ( SELECT 1
 										 FROM   #SkipChecks
@@ -3442,6 +3413,24 @@ AS
 								END;
 
 							END;						
+                        
+                        /* Check if SQL 2017 but not CU3 */
+						IF NOT EXISTS ( SELECT  1
+										FROM    #SkipChecks
+										WHERE   DatabaseName IS NULL AND CheckID = 216 )
+                            AND SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */
+							BEGIN
+							IF (@ProductVersionMajor = 14 AND @ProductVersionMinor < 3015)
+								BEGIN
+								
+								IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 216) WITH NOWAIT;
+								
+								INSERT INTO #BlitzResults(CheckID, Priority, FindingsGroup, Finding, URL, Details)
+									VALUES(216, 100, 'Features', 'Missing Features', 'https://support.microsoft.com/en-us/help/4041814',
+										'SQL 2017 is being used but not Cumulative Update 3. We''d recommend patching to take advantage of increased analytics when running BlitzCache.');
+								END;
+
+							END;		
 
                         /* Performance - High Memory Use for In-Memory OLTP (Hekaton) */
                         IF NOT EXISTS ( SELECT  1
@@ -4291,6 +4280,12 @@ IF @ProductVersionMajor >= 10
 											    FROM sys.dm_xe_sessions
 												WHERE [name] NOT IN
 												( 'AlwaysOn_health', 'system_health', 'telemetry_xevents', 'sp_server_diagnostics sessions', 'hkenginexesession' )
+												( 'AlwaysOn_health', 
+												  'system_health', 
+												  'telemetry_xevents', 
+												  'sp_server_diagnostics', 
+												  'sp_server_diagnostics session', 
+												  'hkenginexesession' )
 												AND name NOT LIKE '%$A%'
 											  HAVING COUNT_BIG(*) >= 2;
 								END;	
@@ -4570,6 +4565,14 @@ IF @ProductVersionMajor >= 10
 		         WHERE  is_online = 1
 		                AND scheduler_id < 255
 		                AND parent_node_id < 64
+						AND EXISTS (
+									SELECT 1
+									FROM ( SELECT    memory_node_id, SUM(online_scheduler_count) AS schedulers
+									       FROM      sys.dm_os_nodes
+									       WHERE     memory_node_id < 64
+									       GROUP  BY memory_node_id ) AS nodes
+										   HAVING MIN(nodes.schedulers) <> MAX(nodes.schedulers)
+									)
 		         GROUP BY parent_node_id,
 		                is_online
 		         HAVING ( COUNT(cpu_id) + 2 ) % 2 = 1;
@@ -6506,6 +6509,45 @@ IF @ProductVersionMajor >= 10
 								FROM    #TraceStatus T;
 					END;
 
+            /* High CMEMTHREAD waits that could need trace flag 8048.
+               This check has to be run AFTER the globally enabled trace flag check,
+               since it uses the #TraceStatus table to know if flags are enabled.
+            */
+			IF @ProductVersionMajor >= 11 AND NOT EXISTS ( SELECT 1
+									FROM   #SkipChecks
+									WHERE  DatabaseName IS NULL AND CheckID = 162 )
+				BEGIN
+							
+					IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 162) WITH NOWAIT;
+
+					INSERT  INTO #BlitzResults
+							( CheckID ,
+								Priority ,
+								FindingsGroup ,
+								Finding ,
+								URL ,
+								Details
+							)
+							SELECT  162 AS CheckID ,
+									50 AS Priority ,
+									'Performance' AS FindingGroup ,
+									'Poison Wait Detected: CMEMTHREAD & NUMA'  AS Finding ,
+									'https://BrentOzar.com/go/poison' AS URL ,
+                                    CONVERT(VARCHAR(10), (MAX([wait_time_ms]) / 1000) / 86400) + ':' + CONVERT(VARCHAR(20), DATEADD(s, (MAX([wait_time_ms]) / 1000), 0), 108) + ' of this wait have been recorded'
+                                    + CASE WHEN ts.status = 1 THEN ' despite enabling trace flag 8048 already.'
+                                        ELSE '. In servers with over 8 cores per NUMA node, when CMEMTHREAD waits are a bottleneck, trace flag 8048 may be needed.'
+                                    END
+							FROM sys.dm_os_nodes n
+							INNER JOIN sys.[dm_os_wait_stats] w ON w.wait_type = 'CMEMTHREAD'
+                            LEFT OUTER JOIN #TraceStatus ts ON ts.TraceFlag = 8048 AND ts.status = 1
+							WHERE n.node_id = 0 AND n.online_scheduler_count >= 8
+								AND EXISTS (SELECT * FROM sys.dm_os_nodes WHERE node_id > 0 AND node_state_desc NOT LIKE '%DAC')
+							GROUP BY w.wait_type, ts.status
+							HAVING SUM([wait_time_ms]) > (SELECT 5000 * datediff(HH,create_date,CURRENT_TIMESTAMP) AS hours_since_startup FROM sys.databases WHERE name='tempdb')
+							AND SUM([wait_time_ms]) > 60000;
+				END;
+
+
 		/*Check for transaction log file larger than data file */
 				IF NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
@@ -7281,14 +7323,15 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 								                           @value_name = 'ActivePowerScheme',
 								                           @value = @outval OUTPUT;
 
-								DECLARE @cpu_speed VARCHAR(256)
+								DECLARE @cpu_speed_mhz int,
+								        @cpu_speed_ghz decimal(18,2);
 								
 								EXEC master.sys.xp_regread @rootkey = 'HKEY_LOCAL_MACHINE',
 								                           @key = 'HARDWARE\DESCRIPTION\System\CentralProcessor\0',
-								                           @value_name = 'ProcessorNameString',
-								                           @value = @cpu_speed OUTPUT;
+								                           @value_name = '~MHz',
+								                           @value = @cpu_speed_mhz OUTPUT;
 								
-								SELECT @cpu_speed = SUBSTRING(@cpu_speed, CHARINDEX('@ ', @cpu_speed) + 1, LEN(@cpu_speed))
+								SELECT @cpu_speed_ghz = CAST(CAST(@cpu_speed_mhz AS DECIMAL) / 1000 AS DECIMAL(18,2));
 
 									INSERT  INTO #BlitzResults
 										( CheckID ,
@@ -7303,9 +7346,9 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 									'Server Info' AS FindingsGroup,
 									'Power Plan' AS Finding,
 									'https://www.brentozar.com/blitz/power-mode/' AS URL,
-									'Your server has'
-									+ @cpu_speed
-									+ ' CPUs, and is in '
+									'Your server has '
+									+ CAST(@cpu_speed_ghz as VARCHAR(4))
+									+ 'GHz CPUs, and is in '
 									+ CASE @outval
 							             WHEN 'a1841308-3541-4fab-bc81-f71556f20b4a'
 							             THEN 'power saving mode -- are you sure this is a production SQL Server?'
@@ -7313,7 +7356,7 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 							             THEN 'balanced power mode -- Uh... you want your CPUs to run at full speed, right?'
 							             WHEN '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
 							             THEN 'high performance power mode'
-										 ELSE 'Unknown!'
+										 ELSE 'an unknown power mode.'
 							        END AS Details
 								
 								END;

@@ -26,8 +26,8 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE @Version VARCHAR(30);
-SET @Version = '1.4';
-SET @VersionDate = '20180401';
+SET @Version = '1.5';
+SET @VersionDate = '20180501';
 
 
 	IF @Help = 1 PRINT '
@@ -189,6 +189,7 @@ SET @VersionDate = '20180401';
 					dd.deadlock_xml.value('(//deadlock/victim-list/victimProcess/@id)[1]', 'NVARCHAR(256)') AS victim_id,
 					ca.dp.value('@id', 'NVARCHAR(256)') AS id,
                     ca.dp.value('@currentdb', 'BIGINT') AS database_id,
+                    ca.dp.value('@priority', 'SMALLINT') AS priority,
                     ca.dp.value('@logused', 'BIGINT') AS log_used,
                     ca.dp.value('@waitresource', 'NVARCHAR(256)') AS wait_resource,
                     ca.dp.value('@waittime', 'BIGINT') AS wait_time,
@@ -443,7 +444,7 @@ SET @VersionDate = '20180401';
 		INSERT #deadlock_findings ( check_id, database_name, object_name, finding_group, finding ) 	
 		SELECT 2 AS check_id, 
 			   ISNULL(DB_NAME(dow.database_id), 'UNKNOWN') AS database_name, 
-			   ISNULL(dow.index_name, 'UNKNOWN') AS index_name,
+			   dow.index_name AS index_name,
 			   'Total index deadlocks' AS finding_group,
 			   'This index was involved in ' 
 				+ CONVERT(NVARCHAR(20), COUNT_BIG(DISTINCT dow.event_date))
@@ -454,6 +455,7 @@ SET @VersionDate = '20180401';
 		AND (dow.event_date >= @StartDate OR @StartDate IS NULL)
 		AND (dow.event_date < @EndDate OR @EndDate IS NULL)
 		AND (dow.object_name = @ObjectName OR @ObjectName IS NULL)
+		AND dow.index_name IS NOT NULL
 		GROUP BY DB_NAME(dow.database_id), dow.index_name
 		OPTION ( RECOMPILE );
 
@@ -788,6 +790,7 @@ SET @VersionDate = '20180401';
 		            dp.id,
 					dp.victim_id,
 		            dp.database_id,
+		            dp.priority,
 		            dp.log_used,
 		            dp.wait_resource,
 		            CONVERT(
@@ -842,6 +845,7 @@ SET @VersionDate = '20180401';
 		            dp.id,
 					dp.victim_id,
 		            dp.database_id,
+		            dp.priority,
 		            dp.log_used,
 		            dp.wait_resource,
 		            CONVERT(XML, N'parallel_deadlock') AS object_names,
@@ -899,6 +903,7 @@ SET @VersionDate = '20180401';
 		       d.host_name,
 		       d.client_app,
 		       d.wait_time,
+		       d.priority,
 			   d.log_used,
 		       d.last_tran_started,
 		       d.last_batch_started,
