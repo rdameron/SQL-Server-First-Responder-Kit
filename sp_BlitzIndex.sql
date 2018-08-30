@@ -9,7 +9,7 @@ SET STATISTICS TIME OFF;
 GO
 
 IF OBJECT_ID('dbo.sp_BlitzIndex') IS NULL
-  EXEC ('CREATE PROCEDURE dbo.sp_BlitzIndex AS RETURN 0;')
+  EXEC ('CREATE PROCEDURE dbo.sp_BlitzIndex AS RETURN 0;');
 GO
 
 ALTER PROCEDURE dbo.sp_BlitzIndex
@@ -20,22 +20,28 @@ ALTER PROCEDURE dbo.sp_BlitzIndex
         /*Note:@Mode doesn't matter if you're specifying schema_name and @TableName.*/
     @Filter TINYINT = 0, /* 0=no filter (default). 1=No low-usage warnings for objects with 0 reads. 2=Only warn for objects >= 500MB */
         /*Note:@Filter doesn't do anything unless @Mode=0*/
-	@SkipPartitions BIT	= 0,
+    @SkipPartitions BIT	= 0,
+    @SkipStatistics BIT	= 1,
     @GetAllDatabases BIT = 0,
     @BringThePain BIT = 0,
     @ThresholdMB INT = 250 /* Number of megabytes that an object must be before we include it in basic results */,
+	@OutputType         VARCHAR(20)     = 'TABLE' ,
     @OutputServerName NVARCHAR(256) = NULL ,
     @OutputDatabaseName NVARCHAR(256) = NULL ,
     @OutputSchemaName NVARCHAR(256) = NULL ,
     @OutputTableName NVARCHAR(256) = NULL ,
-	@Help TINYINT = 0,
-	@VersionDate DATETIME = NULL OUTPUT
+    @Help TINYINT = 0,
+    @VersionDate DATETIME = NULL OUTPUT
+WITH RECOMPILE
 AS
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
 DECLARE @Version VARCHAR(30);
-SET @Version = '4.3';
-SET @VersionDate = '20161014';
+SET @Version = '6.8';
+SET @VersionDate = '20180801';
+SET @OutputType  = UPPER(@OutputType);
+
 IF @Help = 1 PRINT '
 /*
 sp_BlitzIndex from http://FirstResponderKit.org
@@ -72,7 +78,7 @@ https://github.com/BrentOzarULTD/SQL-Server-First-Responder-Kit/milestone/4?clos
 
 MIT License
 
-Copyright (c) 2016 Brent Ozar Unlimited
+Copyright (c) 2018 Brent Ozar Unlimited
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -91,7 +97,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-'
+';
 
 
 DECLARE @ScriptVersionName NVARCHAR(50);
@@ -115,9 +121,36 @@ SET @LineFeed = CHAR(13) + CHAR(10);
 SELECT @SQLServerProductVersion = CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128));
 SELECT @SQLServerEdition =CAST(SERVERPROPERTY('EngineEdition') AS INT); /* We default to online index creates where EngineEdition=3*/
 SET @FilterMB=250;
-SELECT @ScriptVersionName = 'sp_BlitzIndex(TM) v' + @Version + ' - ' + DATENAME(MM, @VersionDate) + ' ' + RIGHT('0'+DATENAME(DD, @VersionDate),2) + ', ' + DATENAME(YY, @VersionDate)
+SELECT @ScriptVersionName = 'sp_BlitzIndex(TM) v' + @Version + ' - ' + DATENAME(MM, @VersionDate) + ' ' + RIGHT('0'+DATENAME(DD, @VersionDate),2) + ', ' + DATENAME(YY, @VersionDate);
 
 RAISERROR(N'Starting run. %s', 0,1, @ScriptVersionName) WITH NOWAIT;
+																					
+IF(@OutputType NOT IN ('TABLE','NONE'))
+BEGIN
+    RAISERROR('Invalid value for parameter @OutputType. Expected: (TABLE;NONE)',12,1);
+    RETURN;
+END;
+                       
+IF(@OutputType = 'NONE')
+BEGIN
+    IF(@OutputTableName IS NULL OR @OutputSchemaName IS NULL OR @OutputDatabaseName IS NULL)
+    BEGIN
+        RAISERROR('This procedure should be called with a value for @Output* parameters, as @OutputType is set to NONE',12,1);
+        RETURN;
+    END;
+    IF(@BringThePain = 1)
+    BEGIN
+        RAISERROR('Incompatible Parameters: @BringThePain set to 1 and @OutputType set to NONE',12,1);
+        RETURN;
+    END;
+	/* Eventually limit by mode																			   
+    IF(@Mode not in (0,4)) 
+	BEGIN
+        RAISERROR('Incompatible Parameters: @Mode set to %d and @OutputType set to NONE',12,1,@Mode);
+        RETURN;
+	END;
+	*/
+END;
 
 IF OBJECT_ID('tempdb..#IndexSanity') IS NOT NULL 
     DROP TABLE #IndexSanity;
@@ -152,6 +185,15 @@ IF OBJECT_ID('tempdb..#Statistics') IS NOT NULL
 IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL 
     DROP TABLE #PartitionCompressionInfo;
 
+IF OBJECT_ID('tempdb..#ComputedColumns') IS NOT NULL 
+    DROP TABLE #ComputedColumns;
+	
+IF OBJECT_ID('tempdb..#TraceStatus') IS NOT NULL
+	DROP TABLE #TraceStatus;
+
+IF OBJECT_ID('tempdb..#TemporalTables') IS NOT NULL
+	DROP TABLE #TemporalTables;
+		
         RAISERROR (N'Create temp tables.',0,1) WITH NOWAIT;
         CREATE TABLE #BlitzIndexResults
             (
@@ -159,11 +201,11 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
               check_id INT NOT NULL,
               index_sanity_id INT NULL,
               Priority INT NULL,
-              findings_group VARCHAR(4000) NOT NULL,
-              finding VARCHAR(200) NOT NULL,
-              [database_name] VARCHAR(200) NULL,
-              URL VARCHAR(200) NOT NULL,
-              details NVARCHAR(4000) NOT NULL,
+              findings_group NVARCHAR(4000) NOT NULL,
+              finding NVARCHAR(200) NOT NULL,
+              [database_name] NVARCHAR(128) NULL,
+              URL NVARCHAR(200) NOT NULL,
+              details NVARCHAR(MAX) NOT NULL,
               index_definition NVARCHAR(MAX) NOT NULL,
               secret_columns NVARCHAR(MAX) NULL,
               index_usage_summary NVARCHAR(MAX) NULL,
@@ -174,7 +216,7 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
 
         CREATE TABLE #IndexSanity
             (
-              [index_sanity_id] INT IDENTITY PRIMARY KEY,
+              [index_sanity_id] INT IDENTITY PRIMARY KEY CLUSTERED,
               [database_id] SMALLINT NOT NULL ,
               [object_id] INT NOT NULL ,
               [index_id] INT NOT NULL ,
@@ -216,11 +258,11 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
               count_secret_columns INT NULL,
               create_date DATETIME NOT NULL,
               modify_date DATETIME NOT NULL,
-            [db_schema_object_name] AS [schema_name] + '.' + [object_name]  ,
-            [db_schema_object_indexid] AS [schema_name] + '.' + [object_name]
-                + CASE WHEN [index_name] IS NOT NULL THEN '.' + index_name
-                ELSE ''
-                END + ' (' + CAST(index_id AS NVARCHAR(20)) + ')' ,
+            [db_schema_object_name] AS [schema_name] + N'.' + [object_name]  ,
+            [db_schema_object_indexid] AS [schema_name] + N'.' + [object_name]
+                + CASE WHEN [index_name] IS NOT NULL THEN N'.' + index_name
+                ELSE N''
+                END + N' (' + CAST(index_id AS NVARCHAR(20)) + N')' ,
             first_key_column_name AS CASE    WHEN count_key_columns > 1
                 THEN LEFT(key_column_names, CHARINDEX(',', key_column_names, 0) - 1)
                 ELSE key_column_names
@@ -233,7 +275,7 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
                 CASE index_id
                     WHEN 0 THEN N'[HEAP] '
                     WHEN 1 THEN N'[CX] '
-                    ELSE N'' END + CASE WHEN is_indexed_view = 1 THEN '[VIEW] '
+                    ELSE N'' END + CASE WHEN is_indexed_view = 1 THEN N'[VIEW] '
                     ELSE N'' END + CASE WHEN is_primary_key = 1 THEN N'[PK] '
                     ELSE N'' END + CASE WHEN is_XML = 1 THEN N'[XML] '
                     ELSE N'' END + CASE WHEN is_spatial = 1 THEN N'[SPATIAL] '
@@ -242,11 +284,11 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
                     ELSE N'' END + CASE WHEN is_hypothetical = 1 THEN N'[HYPOTHETICAL] '
                     ELSE N'' END + CASE WHEN is_unique = 1 AND is_primary_key = 0 THEN N'[UNIQUE] '
                     ELSE N'' END + CASE WHEN count_key_columns > 0 THEN 
-                        N'[' + CAST(count_key_columns AS VARCHAR(10)) + N' KEY' 
+                        N'[' + CAST(count_key_columns AS NVARCHAR(10)) + N' KEY' 
                             + CASE WHEN count_key_columns > 1 THEN  N'S' ELSE N'' END
                             + N'] ' + LTRIM(key_column_names_with_sort_order)
                     ELSE N'' END + CASE WHEN count_included_columns > 0 THEN 
-                        N' [' + CAST(count_included_columns AS VARCHAR(10))  + N' INCLUDE' + 
+                        N' [' + CAST(count_included_columns AS NVARCHAR(10))  + N' INCLUDE' + 
                             + CASE WHEN count_included_columns > 1 THEN  N'S' ELSE N'' END                    
                             + N'] ' + include_column_names
                     ELSE N'' END + CASE WHEN filter_definition <> N'' THEN N' [FILTER] ' + filter_definition
@@ -256,29 +298,33 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
                 THEN ( user_seeks + user_scans + user_lookups )  / (1.0 * user_updates)
                 ELSE 0 END AS MONEY) ,
             [index_usage_summary] AS N'Reads: ' + 
-                REPLACE(CONVERT(NVARCHAR(30),CAST((user_seeks + user_scans + user_lookups) AS MONEY), 1), '.00', '')
+                REPLACE(CONVERT(NVARCHAR(30),CAST((user_seeks + user_scans + user_lookups) AS MONEY), 1), N'.00', N'')
                 + CASE WHEN user_seeks + user_scans + user_lookups > 0 THEN
                     N' (' 
                         + RTRIM(
-                        CASE WHEN user_seeks > 0 THEN REPLACE(CONVERT(NVARCHAR(30),CAST((user_seeks) AS MONEY), 1), '.00', '') + N' seek ' ELSE N'' END
-                        + CASE WHEN user_scans > 0 THEN REPLACE(CONVERT(NVARCHAR(30),CAST((user_scans) AS MONEY), 1), '.00', '') + N' scan '  ELSE N'' END
-                        + CASE WHEN user_lookups > 0 THEN  REPLACE(CONVERT(NVARCHAR(30),CAST((user_lookups) AS MONEY), 1), '.00', '') + N' lookup' ELSE N'' END
+                        CASE WHEN user_seeks > 0 THEN REPLACE(CONVERT(NVARCHAR(30),CAST((user_seeks) AS MONEY), 1), N'.00', N'') + N' seek ' ELSE N'' END
+                        + CASE WHEN user_scans > 0 THEN REPLACE(CONVERT(NVARCHAR(30),CAST((user_scans) AS MONEY), 1), N'.00', N'') + N' scan '  ELSE N'' END
+                        + CASE WHEN user_lookups > 0 THEN  REPLACE(CONVERT(NVARCHAR(30),CAST((user_lookups) AS MONEY), 1), N'.00', N'') + N' lookup' ELSE N'' END
                         )
                         + N') '
                     ELSE N' ' END 
                 + N'Writes:' + 
-                REPLACE(CONVERT(NVARCHAR(30),CAST(user_updates AS MONEY), 1), '.00', ''),
-            [more_info] AS N'EXEC dbo.sp_BlitzIndex @DatabaseName=' + QUOTENAME([database_name],'''') + 
-                N', @SchemaName=' + QUOTENAME([schema_name],'''') + N', @TableName=' + QUOTENAME([object_name],'''') + N';'
+                REPLACE(CONVERT(NVARCHAR(30),CAST(user_updates AS MONEY), 1), N'.00', N''),
+            [more_info] AS N'EXEC dbo.sp_BlitzIndex @DatabaseName=' + QUOTENAME([database_name],N'''') + 
+                N', @SchemaName=' + QUOTENAME([schema_name],N'''') + N', @TableName=' + QUOTENAME([object_name],N'''') + N';'
 		);
+        RAISERROR (N'Adding UQ index on #IndexSanity (database_id, object_id, index_id)',0,1) WITH NOWAIT;
+        IF NOT EXISTS(SELECT 1 FROM tempdb.sys.indexes WHERE name='uq_database_id_object_id_index_id') 
+            CREATE UNIQUE INDEX uq_database_id_object_id_index_id ON #IndexSanity (database_id, object_id, index_id);
 
 
         CREATE TABLE #IndexPartitionSanity
             (
-              [index_partition_sanity_id] INT IDENTITY PRIMARY KEY ,
+              [index_partition_sanity_id] INT IDENTITY,
               [index_sanity_id] INT NULL ,
               [database_id] INT NOT NULL ,
               [object_id] INT NOT NULL ,
+			  [schema_name] NVARCHAR(128) NOT NULL,
               [index_id] INT NOT NULL ,
               [partition_number] INT NOT NULL ,
               row_count BIGINT NOT NULL ,
@@ -303,7 +349,11 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
               page_lock_wait_in_ms BIGINT NULL ,
               index_lock_promotion_attempt_count BIGINT NULL ,
               index_lock_promotion_count BIGINT NULL,
-              data_compression_desc VARCHAR(60) NULL
+              data_compression_desc NVARCHAR(60) NULL,
+			  page_latch_wait_count BIGINT NULL,
+			  page_latch_wait_in_ms BIGINT NULL,
+			  page_io_latch_wait_count BIGINT NULL,
+			  page_io_latch_wait_in_ms BIGINT NULL
             );
 
         CREATE TABLE #IndexSanitySize
@@ -311,6 +361,7 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
               [index_sanity_size_id] INT IDENTITY NOT NULL ,
               [index_sanity_id] INT NULL ,
               [database_id] INT NOT NULL,
+			  [schema_name] NVARCHAR(128) NOT NULL,
               partition_count INT NOT NULL ,
               total_rows BIGINT NOT NULL ,
               total_reserved_MB NUMERIC(29,2) NOT NULL ,
@@ -331,7 +382,11 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
               avg_page_lock_wait_in_ms BIGINT NULL ,
                total_index_lock_promotion_attempt_count BIGINT NULL ,
               total_index_lock_promotion_count BIGINT NULL ,
-              data_compression_desc VARCHAR(8000) NULL,
+              data_compression_desc NVARCHAR(4000) NULL,
+			  page_latch_wait_count BIGINT NULL,
+			  page_latch_wait_in_ms BIGINT NULL,
+			  page_io_latch_wait_count BIGINT NULL,
+			  page_io_latch_wait_in_ms BIGINT NULL,
               index_size_summary AS ISNULL(
                 CASE WHEN partition_count > 1
                         THEN N'[' + CAST(partition_count AS NVARCHAR(10)) + N' PARTITIONS] '
@@ -415,6 +470,7 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
         CREATE TABLE #IndexColumns
             (
               [database_id] INT NOT NULL,
+			  [schema_name] NVARCHAR(128),
               [object_id] INT NOT NULL ,
               [index_id] INT NOT NULL ,
               [key_ordinal] INT NULL ,
@@ -438,9 +494,12 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
               last_value BIGINT NULL,
               is_not_for_replication BIT NULL
             );
+        CREATE CLUSTERED INDEX CLIX_database_id_object_id_index_id ON #IndexColumns
+            (database_id, object_id, index_id);
 
         CREATE TABLE #MissingIndexes
-            ([object_id] INT NOT NULL,
+            ([database_id] INT NOT NULL,
+			[object_id] INT NOT NULL,
             [database_name] NVARCHAR(128) NOT NULL ,
             [schema_name] NVARCHAR(128) NOT NULL ,
             [table_name] NVARCHAR(128),
@@ -454,6 +513,7 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
             equality_columns NVARCHAR(4000), 
             inequality_columns NVARCHAR(4000),
             included_columns NVARCHAR(4000),
+			is_low BIT,
                 [index_estimated_impact] AS 
                     REPLACE(CONVERT(NVARCHAR(256),CAST(CAST(
                                     (user_seeks + user_scans)
@@ -482,7 +542,7 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
                     + CASE WHEN inequality_columns IS NOT NULL THEN inequality_columns ELSE N'' END + 
                     ') ' + CASE WHEN included_columns IS NOT NULL THEN N' INCLUDE (' + included_columns + N')' ELSE N'' END
                     + N' WITH (' 
-                        + N'FILLFACTOR=100, ONLINE=?, SORT_IN_TEMPDB=?' 
+                        + N'FILLFACTOR=100, ONLINE=?, SORT_IN_TEMPDB=?, DATA_COMPRESSION=?' 
                     + N')'
                     + N';'
                     ,
@@ -491,7 +551,9 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
             );
 
         CREATE TABLE #ForeignKeys (
+			[database_id] INT NOT NULL,
             [database_name] NVARCHAR(128) NOT NULL ,
+			[schema_name] NVARCHAR(128) NOT NULL ,
             foreign_key_name NVARCHAR(256),
             parent_object_id INT,
             parent_object_name NVARCHAR(256),
@@ -504,28 +566,32 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
             referenced_fk_columns NVARCHAR(MAX),
             update_referential_action_desc NVARCHAR(16),
             delete_referential_action_desc NVARCHAR(60)
-        )
+        );
         
         CREATE TABLE #IndexCreateTsql (
             index_sanity_id INT NOT NULL,
             create_tsql NVARCHAR(MAX) NOT NULL
-        )
+        );
 
         CREATE TABLE #DatabaseList (
-			DatabaseName NVARCHAR(256)
-        )
+			DatabaseName NVARCHAR(256),
+            secondary_role_allow_connections_desc NVARCHAR(50)
+
+        );
 
 		CREATE TABLE #PartitionCompressionInfo (
 			[index_sanity_id] INT NULL,
-			[partition_compression_detail] VARCHAR(8000) NULL
-        )
+			[partition_compression_detail] NVARCHAR(4000) NULL
+        );
 
 		CREATE TABLE #Statistics (
+		  database_id INT NOT NULL,
 		  database_name NVARCHAR(256) NOT NULL,
 		  table_name NVARCHAR(128) NULL,
-		  index_name sysname NOT NULL,
-		  column_name sysname NOT NULL,
-		  statistics_name NVARCHAR(128) NOT NULL,
+		  schema_name NVARCHAR(128) NULL,
+		  index_name  NVARCHAR(128) NULL,
+		  column_names  NVARCHAR(MAX) NULL,
+		  statistics_name NVARCHAR(128) NULL,
 		  last_statistics_update DATETIME NULL,
 		  days_since_last_stats_update INT NULL,
 		  rows BIGINT NULL,
@@ -535,87 +601,178 @@ IF OBJECT_ID('tempdb..#PartitionCompressionInfo') IS NOT NULL
 		  modification_counter BIGINT NULL,
 		  percent_modifications DECIMAL(18, 1) NULL,
 		  modifications_before_auto_update INT NULL,
-		  index_type_desc NVARCHAR(128) NOT NULL,
+		  index_type_desc NVARCHAR(128) NULL,
 		  table_create_date DATETIME NULL,
-		  table_modify_date DATETIME NULL
+		  table_modify_date DATETIME NULL,
+		  no_recompute BIT NULL,
+		  has_filter BIT NULL,
+		  filter_definition NVARCHAR(MAX) NULL
 		); 
 
+		CREATE TABLE #ComputedColumns
+		(
+		  index_sanity_id INT IDENTITY(1, 1) NOT NULL,
+		  database_name NVARCHAR(128) NULL,
+		  database_id INT NOT NULL,
+		  table_name NVARCHAR(128) NOT NULL,
+		  schema_name NVARCHAR(128) NOT NULL,
+		  column_name NVARCHAR(128) NULL,
+		  is_nullable BIT NULL,
+		  definition NVARCHAR(MAX) NULL,
+		  uses_database_collation BIT NOT NULL,
+		  is_persisted BIT NOT NULL,
+		  is_computed BIT NOT NULL,
+		  is_function INT NOT NULL,
+		  column_definition NVARCHAR(MAX) NULL
+		);
+		
+		CREATE TABLE #TraceStatus
+		(
+		 TraceFlag NVARCHAR(10) ,
+		 status BIT ,
+		 Global BIT ,
+		 Session BIT
+		);
 
+        CREATE TABLE #TemporalTables
+        (
+            index_sanity_id INT IDENTITY(1, 1) NOT NULL,
+            database_name NVARCHAR(128) NOT NULL,
+            database_id INT NOT NULL,
+            schema_name NVARCHAR(128) NOT NULL,
+            table_name NVARCHAR(128) NOT NULL,
+            history_table_name NVARCHAR(128) NOT NULL,
+            history_schema_name NVARCHAR(128) NOT NULL,
+            start_column_name NVARCHAR(128) NOT NULL,
+            end_column_name NVARCHAR(128) NOT NULL,
+            period_name NVARCHAR(128) NOT NULL
+        );
+
+/* Sanitize our inputs */
+SELECT
+	@OutputServerName = QUOTENAME(@OutputServerName),
+	@OutputDatabaseName = QUOTENAME(@OutputDatabaseName),
+	@OutputSchemaName = QUOTENAME(@OutputSchemaName),
+	@OutputTableName = QUOTENAME(@OutputTableName);
+					
+					
 IF @GetAllDatabases = 1
     BEGIN
         INSERT INTO #DatabaseList (DatabaseName)
         SELECT  DB_NAME(database_id)
         FROM    sys.databases
-        WHERE user_access_desc='MULTI_USER'
+        WHERE user_access_desc = 'MULTI_USER'
         AND state_desc = 'ONLINE'
         AND database_id > 4
-        AND DB_NAME(database_id) NOT IN ('ReportServer','ReportServerTempDB')
-        AND is_distributor = 0;
-    END
+        AND DB_NAME(database_id) NOT LIKE 'ReportServer%'
+        AND is_distributor = 0
+		OPTION    ( RECOMPILE );
+
+        /* Skip non-readable databases in an AG - see Github issue #1160 */
+        IF EXISTS (SELECT * FROM sys.all_objects o INNER JOIN sys.all_columns c ON o.object_id = c.object_id AND o.name = 'dm_hadr_availability_replica_states' AND c.name = 'role_desc')
+            BEGIN
+            SET @dsql = N'UPDATE #DatabaseList SET secondary_role_allow_connections_desc = ''NO'' WHERE DatabaseName IN (
+                        SELECT d.name 
+                        FROM sys.dm_hadr_availability_replica_states rs
+                        INNER JOIN sys.databases d ON rs.replica_id = d.replica_id
+                        INNER JOIN sys.availability_replicas r ON rs.replica_id = r.replica_id
+                        WHERE rs.role_desc = ''SECONDARY''
+                        AND r.secondary_role_allow_connections_desc = ''NO'')
+						OPTION    ( RECOMPILE );';
+            EXEC sp_executesql @dsql;
+
+            IF EXISTS (SELECT * FROM #DatabaseList WHERE secondary_role_allow_connections_desc = 'NO')
+                BEGIN
+                INSERT    #BlitzIndexResults ( Priority, check_id, findings_group, finding, database_name, URL, details, index_definition,
+                                                index_usage_summary, index_size_summary )
+                VALUES  ( 1, 
+				          0, 
+		                  N'Skipped non-readable AG secondary databases.',
+                          N'You are running this on an AG secondary, and some of your databases are configured as non-readable when this is a secondary node.',
+				          N'To analyze those databases, run sp_BlitzIndex on the primary, or on a readable secondary.',
+                          'http://FirstResponderKit.org', '', '', '', ''
+                        );        
+                END;
+            END;
+
+    END;
 ELSE
     BEGIN
         INSERT INTO #DatabaseList
                 ( DatabaseName )
-        SELECT CASE WHEN @DatabaseName IS NULL OR @DatabaseName = N'' THEN DB_NAME()
-                    ELSE @DatabaseName END
-    END
+        SELECT CASE 
+		            WHEN @DatabaseName IS NULL OR @DatabaseName = N'' 
+		            THEN DB_NAME()
+                    ELSE @DatabaseName END;
+               END;
 
 SET @NumDatabases = @@ROWCOUNT;
 
 /* Running on 50+ databases can take a reaaallly long time, so we want explicit permission to do so (and only after warning about it) */
 
 BEGIN TRY
-        IF @NumDatabases >= 50 AND @BringThePain != 1
+        IF @NumDatabases >= 50 AND @BringThePain != 1 AND @TableName IS NULL
         BEGIN
 
             INSERT    #BlitzIndexResults ( Priority, check_id, findings_group, finding, URL, details, index_definition,
                                             index_usage_summary, index_size_summary )
-            VALUES  ( -1, 0 , 
-		            @ScriptVersionName,
-                    CASE WHEN @GetAllDatabases = 1 THEN N'All Databases' ELSE N'Database ' + QUOTENAME(@DatabaseName) + N' as of ' + CONVERT(NVARCHAR(16),GETDATE(),121) END, 
-                    N'From Your Community Volunteers' ,   N'http://www.BrentOzar.com/BlitzIndex' ,
-                    N''
-                    , N'',N''
+            VALUES  ( -1, 
+			          0 , 
+		              @ScriptVersionName,
+                      CASE WHEN @GetAllDatabases = 1 THEN N'All Databases' ELSE N'Database ' + QUOTENAME(@DatabaseName) + N' as of ' + CONVERT(NVARCHAR(16), GETDATE(), 121) END, 
+                      N'From Your Community Volunteers',   
+					  N'http://www.BrentOzar.com/BlitzIndex',
+                      N'',
+                      N'',
+					  N''
                     );
             INSERT    #BlitzIndexResults ( Priority, check_id, findings_group, finding, database_name, URL, details, index_definition,
                                             index_usage_summary, index_size_summary )
-            VALUES  ( 1, 0 , 
-		           N'You''re trying to run sp_BlitzIndex on a server with ' + CAST(@NumDatabases AS NVARCHAR(8)) + N' databases. ',
-                   N'Running sp_BlitzIndex on a server with 50+ databases may cause temporary insanity for the server and/or user.',
-				   N'If you''re sure you want to do this, run again with the parameter @BringThePain = 1.',
-                   'http://FirstResponderKit.org', '', '', '', ''
+            VALUES  ( 1, 
+			          0, 
+		              N'You''re trying to run sp_BlitzIndex on a server with ' + CAST(@NumDatabases AS NVARCHAR(8)) + N' databases. ',
+                      N'Running sp_BlitzIndex on a server with 50+ databases may cause temporary insanity for the server and/or user.',
+				      N'If you''re sure you want to do this, run again with the parameter @BringThePain = 1.',
+                      'http://FirstResponderKit.org', 
+					  '', 
+					  '', 
+					  '', 
+					  ''
                     );        
-		
-		SELECT bir.blitz_result_id,
-               bir.check_id,
-               bir.index_sanity_id,
-               bir.Priority,
-               bir.findings_group,
-               bir.finding,
-               bir.database_name,
-               bir.URL,
-               bir.details,
-               bir.index_definition,
-               bir.secret_columns,
-               bir.index_usage_summary,
-               bir.index_size_summary,
-               bir.create_tsql,
-               bir.more_info 
-			   FROM #BlitzIndexResults AS bir
+            
+			if(@OutputType <> 'NONE')
+			BEGIN
+				SELECT bir.blitz_result_id,
+					   bir.check_id,
+					   bir.index_sanity_id,
+					   bir.Priority,
+					   bir.findings_group,
+					   bir.finding,
+					   bir.database_name,
+					   bir.URL,
+					   bir.details,
+					   bir.index_definition,
+					   bir.secret_columns,
+					   bir.index_usage_summary,
+					   bir.index_size_summary,
+					   bir.create_tsql,
+					   bir.more_info 
+					   FROM #BlitzIndexResults AS bir;
+				RAISERROR('Running sp_BlitzIndex on a server with 50+ databases may cause temporary insanity for the server', 12, 1);
+			END;
 
 		RETURN;
 
-		END
+		END;
 END TRY
 BEGIN CATCH
         RAISERROR (N'Failure to execute due to number of databases.', 0,1) WITH NOWAIT;
 
-        SELECT    @msg = ERROR_MESSAGE(), @ErrorSeverity = ERROR_SEVERITY(), @ErrorState = ERROR_STATE();
+        SELECT  @msg = ERROR_MESSAGE(), 
+		          @ErrorSeverity = ERROR_SEVERITY(), 
+				  @ErrorState = ERROR_STATE();
 
-        RAISERROR (@msg, 
-               @ErrorSeverity, 
-               @ErrorState 
-               );
+        RAISERROR (@msg, @ErrorSeverity, @ErrorState);
         
         WHILE @@trancount > 0 
             ROLLBACK;
@@ -628,11 +785,12 @@ BEGIN CATCH
 DECLARE c1 CURSOR 
 LOCAL FAST_FORWARD 
 FOR 
-SELECT DatabaseName FROM #DatabaseList ORDER BY DatabaseName
+SELECT DatabaseName FROM #DatabaseList WHERE COALESCE(secondary_role_allow_connections_desc, 'OK') <> 'NO' ORDER BY DatabaseName;
 
-OPEN c1
-FETCH NEXT FROM c1 INTO @DatabaseName
-                WHILE @@FETCH_STATUS = 0
+OPEN c1;
+FETCH NEXT FROM c1 INTO @DatabaseName;
+     WHILE @@FETCH_STATUS = 0
+
 BEGIN
     
     RAISERROR (@LineFeed, 0, 1) WITH NOWAIT;
@@ -646,7 +804,7 @@ FROM     sys.databases
          AND state_desc = 'ONLINE';
 
 /* Last startup */
-SELECT @DaysUptime = CAST(DATEDIFF(hh,create_date,GETDATE())/24. AS NUMERIC (23,2))
+SELECT  @DaysUptime = CAST(DATEDIFF(HOUR, create_date, GETDATE()) / 24. AS NUMERIC (23,2))
 FROM    sys.databases
 WHERE   database_id = 2;
 
@@ -663,51 +821,51 @@ BEGIN TRY
 
         IF (SELECT LEFT(@SQLServerProductVersion,
               CHARINDEX('.',@SQLServerProductVersion,0)-1
-              )) <= 8
+              )) <= 9
         BEGIN
-            SET @msg=N'sp_BlitzIndex is only supported on SQL Server 2005 and higher. The version of this instance is: ' + @SQLServerProductVersion;
+            SET @msg=N'sp_BlitzIndex is only supported on SQL Server 2008 and higher. The version of this instance is: ' + @SQLServerProductVersion;
             RAISERROR(@msg,16,1);
-        END
+        END;
 
         --Short circuit here if database name does not exist.
         IF @DatabaseName IS NULL OR @DatabaseID IS NULL
         BEGIN
-            SET @msg='Database does not exist or is not online/multi-user: cannot proceed.'
+            SET @msg='Database does not exist or is not online/multi-user: cannot proceed.';
             RAISERROR(@msg,16,1);
-        END    
+        END;    
 
         --Validate parameters.
         IF (@Mode NOT IN (0,1,2,3,4))
         BEGIN
             SET @msg=N'Invalid @Mode parameter. 0=diagnose, 1=summarize, 2=index detail, 3=missing index detail, 4=diagnose detail';
             RAISERROR(@msg,16,1);
-        END
+        END;
 
         IF (@Mode <> 0 AND @TableName IS NOT NULL)
         BEGIN
             SET @msg=N'Setting the @Mode doesn''t change behavior if you supply @TableName. Use default @Mode=0 to see table detail.';
             RAISERROR(@msg,16,1);
-        END
+        END;
 
         IF ((@Mode <> 0 OR @TableName IS NOT NULL) AND @Filter <> 0)
         BEGIN
-            SET @msg=N'@Filter only appies when @Mode=0 and @TableName is not specified. Please try again.';
+            SET @msg=N'@Filter only applies when @Mode=0 and @TableName is not specified. Please try again.';
             RAISERROR(@msg,16,1);
-        END
+        END;
 
         IF (@SchemaName IS NOT NULL AND @TableName IS NULL) 
         BEGIN
-            SET @msg='We can''t run against a whole schema! Specify a @TableName, or leave both NULL for diagnosis.'
+            SET @msg='We can''t run against a whole schema! Specify a @TableName, or leave both NULL for diagnosis.';
             RAISERROR(@msg,16,1);
-        END
+        END;
 
 
         IF  (@TableName IS NOT NULL AND @SchemaName IS NULL)
         BEGIN
-            SET @SchemaName=N'dbo'
-            SET @msg='@SchemaName wasn''t specified-- assuming schema=dbo.'
+            SET @SchemaName=N'dbo';
+            SET @msg='@SchemaName wasn''t specified-- assuming schema=dbo.';
             RAISERROR(@msg,1,1) WITH NOWAIT;
-        END
+        END;
 
         --If a table is specified, grab the object id.
         --Short circuit if it doesn't exist.
@@ -715,7 +873,7 @@ BEGIN TRY
         BEGIN
             SET @dsql = N'
                     SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-                    SELECT    @ObjectID= OBJECT_ID
+                    SELECT  @ObjectID= OBJECT_ID
                     FROM    ' + QUOTENAME(@DatabaseName) + N'.sys.objects AS so
                     JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.schemas AS sc on 
                         so.schema_id=sc.schema_id
@@ -729,7 +887,7 @@ BEGIN TRY
                         WHERE so.object_id=si.object_id)
                     OPTION (RECOMPILE);';
 
-            SET @params='@ObjectID INT OUTPUT'                
+            SET @params='@ObjectID INT OUTPUT';                
 
             IF @dsql IS NULL 
                 RAISERROR('@dsql is null',16,1);
@@ -739,11 +897,11 @@ BEGIN TRY
             IF @ObjectID IS NULL
                     BEGIN
                         SET @msg=N'Oh, this is awkward. I can''t find the table or indexed view you''re looking for in that database.' + CHAR(10) +
-                            N'Please check your parameters.'
+                            N'Please check your parameters.';
                         RAISERROR(@msg,1,1);
                         RETURN;
-                    END
-        END
+                    END;
+        END;
 
         --set @collation
         SELECT @collation=collation_name
@@ -753,7 +911,8 @@ BEGIN TRY
         --insert columns for clustered indexes and heaps
         --collect info on identity columns for this one
         SET @dsql = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-                SELECT ' + CAST(@DatabaseID AS NVARCHAR(16)) + ',    
+                SELECT ' + CAST(@DatabaseID AS NVARCHAR(16)) + ',
+					s.name,    
                     si.object_id, 
                     si.index_id, 
                     sc.key_ordinal, 
@@ -789,17 +948,20 @@ BEGIN TRY
                 JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.types st ON 
                     c.system_type_id=st.system_type_id
                     AND c.user_type_id=st.user_type_id
+				JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.objects AS so  ON si.object_id = so.object_id
+																		  AND so.is_ms_shipped = 0
+				JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.schemas AS s ON s.schema_id = so.schema_id
                 WHERE si.index_id in (0,1) ' 
                     + CASE WHEN @ObjectID IS NOT NULL 
                         THEN N' AND si.object_id=' + CAST(@ObjectID AS NVARCHAR(30)) 
                     ELSE N'' END 
-                + N';';
+                + N'OPTION (RECOMPILE);';
 
         IF @dsql IS NULL 
             RAISERROR('@dsql is null',16,1);
 
         RAISERROR (N'Inserting data into #IndexColumns for clustered indexes and heaps',0,1) WITH NOWAIT;
-        INSERT    #IndexColumns ( database_id, object_id, index_id, key_ordinal, is_included_column, is_descending_key, partition_ordinal,
+        INSERT    #IndexColumns ( database_id, [schema_name], [object_id], index_id, key_ordinal, is_included_column, is_descending_key, partition_ordinal,
             column_name, system_type_name, max_length, precision, scale, collation_name, is_nullable, is_identity, is_computed,
             is_replicated, is_sparse, is_filestream, seed_value, increment_value, last_value, is_not_for_replication )
                 EXEC sp_executesql @dsql;
@@ -808,7 +970,8 @@ BEGIN TRY
         --this uses a full join to sys.index_columns
         --We don't collect info on identity columns here. They may be in NC indexes, but we just analyze identities in the base table.
         SET @dsql = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-                SELECT ' + CAST(@DatabaseID AS NVARCHAR(16)) + ',    
+                SELECT ' + CAST(@DatabaseID AS NVARCHAR(16)) + ', 
+					s.name,    
                     si.object_id, 
                     si.index_id, 
                     sc.key_ordinal, 
@@ -837,27 +1000,30 @@ BEGIN TRY
                 JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.types AS st ON 
                     c.system_type_id=st.system_type_id
                     AND c.user_type_id=st.user_type_id
+				JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.objects AS so  ON si.object_id = so.object_id
+																		  AND so.is_ms_shipped = 0
+				JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.schemas AS s ON s.schema_id = so.schema_id
                 WHERE si.index_id not in (0,1) ' 
                     + CASE WHEN @ObjectID IS NOT NULL 
                         THEN N' AND si.object_id=' + CAST(@ObjectID AS NVARCHAR(30)) 
                     ELSE N'' END 
-                + N';';
+                + N'OPTION (RECOMPILE);';
 
         IF @dsql IS NULL 
             RAISERROR('@dsql is null',16,1);
 
         RAISERROR (N'Inserting data into #IndexColumns for nonclustered indexes',0,1) WITH NOWAIT;
-        INSERT    #IndexColumns ( database_id, object_id, index_id, key_ordinal, is_included_column, is_descending_key, partition_ordinal,
+        INSERT    #IndexColumns ( database_id, [schema_name], [object_id], index_id, key_ordinal, is_included_column, is_descending_key, partition_ordinal,
             column_name, system_type_name, max_length, precision, scale, collation_name, is_nullable, is_identity, is_computed,
             is_replicated, is_sparse, is_filestream )
                 EXEC sp_executesql @dsql;
-                    
+           
         SET @dsql = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-                SELECT    ' + CAST(@DatabaseID AS NVARCHAR(10)) + ' AS database_id, 
+                SELECT  ' + CAST(@DatabaseID AS NVARCHAR(10)) + N' AS database_id, 
                         so.object_id, 
                         si.index_id, 
                         si.type,
-                        ' + QUOTENAME(@DatabaseName, '''') + ' AS database_name, 
+                        @i_DatabaseName AS database_name, 
                         COALESCE(sc.NAME, ''Unknown'') AS [schema_name],
                         COALESCE(so.name, ''Unknown'') AS [object_name], 
                         COALESCE(si.name, ''Unknown'') AS [index_name],
@@ -872,26 +1038,26 @@ BEGIN TRY
                         si.is_hypothetical, 
                         si.is_padded, 
                         si.fill_factor,'
-                        + CASE WHEN @SQLServerProductVersion NOT LIKE '9%' THEN '
+                        + CASE WHEN @SQLServerProductVersion NOT LIKE '9%' THEN N'
                         CASE WHEN si.filter_definition IS NOT NULL THEN si.filter_definition
-                             ELSE ''''
-                        END AS filter_definition' ELSE ''''' AS filter_definition' END + '
+                             ELSE N''''
+                        END AS filter_definition' ELSE N''''' AS filter_definition' END + N'
                         , ISNULL(us.user_seeks, 0), ISNULL(us.user_scans, 0),
                         ISNULL(us.user_lookups, 0), ISNULL(us.user_updates, 0), us.last_user_seek, us.last_user_scan,
                         us.last_user_lookup, us.last_user_update,
                         so.create_date, so.modify_date
-                FROM    ' + QUOTENAME(@DatabaseName) + '.sys.indexes AS si WITH (NOLOCK)
-                        JOIN ' + QUOTENAME(@DatabaseName) + '.sys.objects AS so WITH (NOLOCK) ON si.object_id = so.object_id
+                FROM    ' + QUOTENAME(@DatabaseName) + N'.sys.indexes AS si WITH (NOLOCK)
+                        JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.objects AS so WITH (NOLOCK) ON si.object_id = so.object_id
                                                AND so.is_ms_shipped = 0 /*Exclude objects shipped by Microsoft*/
                                                AND so.type <> ''TF'' /*Exclude table valued functions*/
-                        JOIN ' + QUOTENAME(@DatabaseName) + '.sys.schemas sc ON so.schema_id = sc.schema_id
+                        JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.schemas sc ON so.schema_id = sc.schema_id
                         LEFT JOIN sys.dm_db_index_usage_stats AS us WITH (NOLOCK) ON si.[object_id] = us.[object_id]
                                                                        AND si.index_id = us.index_id
-                                                                       AND us.database_id = '+ CAST(@DatabaseID AS NVARCHAR(10)) + '
+                                                                       AND us.database_id = ' + CAST(@DatabaseID AS NVARCHAR(10)) + N'
                 WHERE    si.[type] IN ( 0, 1, 2, 3, 4, 5, 6 ) 
                 /* Heaps, clustered, nonclustered, XML, spatial, Cluster Columnstore, NC Columnstore */ ' +
-                CASE WHEN @TableName IS NOT NULL THEN ' and so.name=' + QUOTENAME(@TableName,'''') + ' ' ELSE '' END + 
-        'OPTION    ( RECOMPILE );
+                CASE WHEN @TableName IS NOT NULL THEN N' and so.name=' + QUOTENAME(@TableName,N'''') + N' ' ELSE N'' END + 
+        N'OPTION    ( RECOMPILE );
         ';
         IF @dsql IS NULL 
             RAISERROR('@dsql is null',16,1);
@@ -902,123 +1068,31 @@ BEGIN TRY
                                 is_disabled, is_hypothetical, is_padded, fill_factor, filter_definition, user_seeks, user_scans, 
                                 user_lookups, user_updates, last_user_seek, last_user_scan, last_user_lookup, last_user_update,
                                 create_date, modify_date )
-                EXEC sp_executesql @dsql;
+                EXEC sp_executesql @dsql, @params = N'@i_DatabaseName NVARCHAR(128)', @i_DatabaseName = @DatabaseName;
 
-        RAISERROR (N'Updating #IndexSanity.key_column_names',0,1) WITH NOWAIT;
-        UPDATE    #IndexSanity
-        SET        key_column_names = D1.key_column_names
-        FROM    #IndexSanity si
-                CROSS APPLY ( SELECT    RTRIM(STUFF( (SELECT    N', ' + c.column_name 
-                                    + N' {' + system_type_name + N' ' + CAST(max_length AS NVARCHAR(50)) +  N'}'
-                                        AS col_definition
-                                    FROM    #IndexColumns c
-                                    WHERE    c.database_id= si.database_id
-                                            AND c.object_id = si.object_id
-                                            AND c.index_id = si.index_id
-                                            AND c.is_included_column = 0 /*Just Keys*/
-                                            AND c.key_ordinal > 0 /*Ignore non-key columns, such as partitioning keys*/
-                                    ORDER BY c.object_id, c.index_id, c.key_ordinal    
-                            FOR      XML PATH('') ,TYPE).value('.', 'varchar(max)'), 1, 1, ''))
-                                        ) D1 ( key_column_names )
 
-        RAISERROR (N'Updating #IndexSanity.partition_key_column_name',0,1) WITH NOWAIT;
-        UPDATE    #IndexSanity
-        SET        partition_key_column_name = D1.partition_key_column_name
-        FROM    #IndexSanity si
-                CROSS APPLY ( SELECT    RTRIM(STUFF( (SELECT    N', ' + c.column_name AS col_definition
-                                    FROM    #IndexColumns c
-                                    WHERE    c.database_id= si.database_id
-                                            AND c.object_id = si.object_id
-                                            AND c.index_id = si.index_id
-                                            AND c.partition_ordinal <> 0 /*Just Partitioned Keys*/
-                                    ORDER BY c.object_id, c.index_id, c.key_ordinal    
-                            FOR      XML PATH('') , TYPE).value('.', 'varchar(max)'), 1, 1,''))) D1 
-                                        ( partition_key_column_name )
+        RAISERROR (N'Checking partition count',0,1) WITH NOWAIT;
+        IF @BringThePain = 0 AND @SkipPartitions = 0 AND @TableName IS NULL
+            BEGIN
+                /* Count the total number of partitions */
+                SET @dsql = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                        SELECT @RowcountOUT = SUM(1) FROM ' + QUOTENAME(@DatabaseName) + '.sys.partitions WHERE partition_number > 1 OPTION    ( RECOMPILE );';
+                EXEC sp_executesql @dsql, N'@RowcountOUT BIGINT OUTPUT', @RowcountOUT = @Rowcount OUTPUT;
+                IF @Rowcount > 100
+                    BEGIN
+                        RAISERROR (N'Setting @SkipPartitions = 1 because > 100 partitions were found. To check them, you must set @BringThePain = 1.',16,1) WITH NOWAIT;
+                        SET @SkipPartitions = 1;
+                        INSERT    #BlitzIndexResults ( Priority, check_id, findings_group, finding, URL, details, index_definition,
+                                                        index_usage_summary, index_size_summary )
+                        VALUES  ( 1, 0 , 
+		                       'Some Checks Were Skipped',
+                               '@SkipPartitions Forced to 1',
+                               'http://FirstResponderKit.org', CAST(@Rowcount AS NVARCHAR(50)) + ' partitions found. To analyze them, use @BringThePain = 1.', 'We try to keep things quick - and warning, running @BringThePain = 1 can take tens of minutes.', '', ''
+                                );
+                    END;
+            END;
 
-        RAISERROR (N'Updating #IndexSanity.key_column_names_with_sort_order',0,1) WITH NOWAIT;
-        UPDATE    #IndexSanity
-        SET        key_column_names_with_sort_order = D2.key_column_names_with_sort_order
-        FROM    #IndexSanity si
-                CROSS APPLY ( SELECT    RTRIM(STUFF( (SELECT    N', ' + c.column_name + CASE c.is_descending_key
-                                    WHEN 1 THEN N' DESC'
-                                    ELSE N''
-                                + N' {' + system_type_name + N' ' + CAST(max_length AS NVARCHAR(50)) +  N'}'
-                                END AS col_definition
-                            FROM    #IndexColumns c
-                            WHERE    c.database_id= si.database_id
-                                    AND c.object_id = si.object_id
-                                    AND c.index_id = si.index_id
-                                    AND c.is_included_column = 0 /*Just Keys*/
-                                    AND c.key_ordinal > 0 /*Ignore non-key columns, such as partitioning keys*/
-                            ORDER BY c.object_id, c.index_id, c.key_ordinal    
-                    FOR      XML PATH('') , TYPE).value('.', 'varchar(max)'), 1, 1, ''))
-                    ) D2 ( key_column_names_with_sort_order )
 
-        RAISERROR (N'Updating #IndexSanity.key_column_names_with_sort_order_no_types (for create tsql)',0,1) WITH NOWAIT;
-        UPDATE    #IndexSanity
-        SET        key_column_names_with_sort_order_no_types = D2.key_column_names_with_sort_order_no_types
-        FROM    #IndexSanity si
-                CROSS APPLY ( SELECT    RTRIM(STUFF( (SELECT    N', ' + QUOTENAME(c.column_name) + CASE c.is_descending_key
-                                    WHEN 1 THEN N' [DESC]'
-                                    ELSE N''
-                                END AS col_definition
-                            FROM    #IndexColumns c
-                            WHERE    c.database_id= si.database_id
-                                    AND c.object_id = si.object_id
-                                    AND c.index_id = si.index_id
-                                    AND c.is_included_column = 0 /*Just Keys*/
-                                    AND c.key_ordinal > 0 /*Ignore non-key columns, such as partitioning keys*/
-                            ORDER BY c.object_id, c.index_id, c.key_ordinal    
-                    FOR      XML PATH('') , TYPE).value('.', 'varchar(max)'), 1, 1, ''))
-                    ) D2 ( key_column_names_with_sort_order_no_types )
-
-        RAISERROR (N'Updating #IndexSanity.include_column_names',0,1) WITH NOWAIT;
-        UPDATE    #IndexSanity
-        SET        include_column_names = D3.include_column_names
-        FROM    #IndexSanity si
-                CROSS APPLY ( SELECT    RTRIM(STUFF( (SELECT    N', ' + c.column_name
-                                + N' {' + system_type_name + N' ' + CAST(max_length AS NVARCHAR(50)) +  N'}'
-                                FROM    #IndexColumns c
-                                WHERE    c.database_id= si.database_id
-                                        AND c.object_id = si.object_id
-                                        AND c.index_id = si.index_id
-                                        AND c.is_included_column = 1 /*Just includes*/
-                                ORDER BY c.column_name /*Order doesn't matter in includes, 
-                                        this is here to make rows easy to compare.*/ 
-                        FOR      XML PATH('') ,  TYPE).value('.', 'varchar(max)'), 1, 1, ''))
-                        ) D3 ( include_column_names );
-
-        RAISERROR (N'Updating #IndexSanity.include_column_names_no_types (for create tsql)',0,1) WITH NOWAIT;
-        UPDATE    #IndexSanity
-        SET        include_column_names_no_types = D3.include_column_names_no_types
-        FROM    #IndexSanity si
-                CROSS APPLY ( SELECT    RTRIM(STUFF( (SELECT    N', ' + QUOTENAME(c.column_name)
-                                FROM    #IndexColumns c
-                                        WHERE    c.database_id= si.database_id
-                                        AND c.object_id = si.object_id
-                                        AND c.index_id = si.index_id
-                                        AND c.is_included_column = 1 /*Just includes*/
-                                ORDER BY c.column_name /*Order doesn't matter in includes, 
-                                        this is here to make rows easy to compare.*/ 
-                        FOR      XML PATH('') ,  TYPE).value('.', 'varchar(max)'), 1, 1, ''))
-                        ) D3 ( include_column_names_no_types );
-
-        RAISERROR (N'Updating #IndexSanity.count_key_columns and count_include_columns',0,1) WITH NOWAIT;
-        UPDATE    #IndexSanity
-        SET        count_included_columns = D4.count_included_columns,
-                count_key_columns = D4.count_key_columns
-        FROM    #IndexSanity si
-                CROSS APPLY ( SELECT    SUM(CASE WHEN is_included_column = 'true' THEN 1
-                                                 ELSE 0
-                                            END) AS count_included_columns,
-                                        SUM(CASE WHEN is_included_column = 'false' AND c.key_ordinal > 0 THEN 1
-                                                 ELSE 0
-                                            END) AS count_key_columns
-                              FROM        #IndexColumns c
-                                    WHERE    c.database_id= si.database_id
-                                            AND c.object_id = si.object_id
-                                        AND c.index_id = si.index_id 
-                                        ) AS D4 ( count_included_columns, count_key_columns );
 
 		 IF (@SkipPartitions = 0)
 			BEGIN			
@@ -1031,8 +1105,9 @@ BEGIN TRY
             --NOTE: If you want to use the newer syntax for 2012+, you'll have to change 2147483647 to 11 on line ~819
 			--This change was made because on a table with lots of paritions, the OUTER APPLY was crazy slow.
             SET @dsql = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-                        SELECT    ' + CAST(@DatabaseID AS NVARCHAR(10)) + ' AS database_id,
+                        SELECT  ' + CAST(@DatabaseID AS NVARCHAR(10)) + ' AS database_id,
                                 ps.object_id, 
+								s.name,
                                 ps.index_id, 
                                 ps.partition_number, 
                                 ps.row_count,
@@ -1057,12 +1132,17 @@ BEGIN TRY
                                 os.page_lock_wait_in_ms,
                                 os.index_lock_promotion_attempt_count, 
                                 os.index_lock_promotion_count, 
+								os.page_latch_wait_count,
+								os.page_latch_wait_in_ms,
+								os.page_io_latch_wait_count,								
+								os.page_io_latch_wait_in_ms,
                             ' + CASE WHEN @SQLServerProductVersion NOT LIKE '9%' THEN 'par.data_compression_desc ' ELSE 'null as data_compression_desc' END + '
                     FROM    ' + QUOTENAME(@DatabaseName) + '.sys.dm_db_partition_stats AS ps  
                     JOIN ' + QUOTENAME(@DatabaseName) + '.sys.partitions AS par on ps.partition_id=par.partition_id
                     JOIN ' + QUOTENAME(@DatabaseName) + '.sys.objects AS so ON ps.object_id = so.object_id
                                AND so.is_ms_shipped = 0 /*Exclude objects shipped by Microsoft*/
                                AND so.type <> ''TF'' /*Exclude table valued functions*/
+					JOIN ' + QUOTENAME(@DatabaseName) + '.sys.schemas AS s ON s.schema_id = so.schema_id
                     LEFT JOIN ' + QUOTENAME(@DatabaseName) + '.sys.dm_db_index_operational_stats('
                 + CAST(@DatabaseID AS NVARCHAR(10)) + ', NULL, NULL,NULL) AS os ON
                     ps.object_id=os.object_id and ps.index_id=os.index_id and ps.partition_number=os.partition_number 
@@ -1072,7 +1152,7 @@ BEGIN TRY
             ORDER BY ps.object_id,  ps.index_id, ps.partition_number
             OPTION    ( RECOMPILE );
             ';
-        END
+        END;
         ELSE
         BEGIN
         RAISERROR (N'Using 2012 syntax to query sys.dm_db_index_operational_stats',0,1) WITH NOWAIT;
@@ -1081,6 +1161,7 @@ BEGIN TRY
          SET @dsql = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
                         SELECT  ' + CAST(@DatabaseID AS NVARCHAR(10)) + ' AS database_id,
                                 ps.object_id, 
+								s.name,
                                 ps.index_id, 
                                 ps.partition_number, 
                                 ps.row_count,
@@ -1104,13 +1185,18 @@ BEGIN TRY
                                 os.page_lock_wait_count, 
                                 os.page_lock_wait_in_ms,
                                 os.index_lock_promotion_attempt_count, 
-                                os.index_lock_promotion_count, 
+                                os.index_lock_promotion_count,
+								os.page_latch_wait_count,
+								os.page_latch_wait_in_ms,
+								os.page_io_latch_wait_count,								
+								os.page_io_latch_wait_in_ms, 
                                 ' + CASE WHEN @SQLServerProductVersion NOT LIKE '9%' THEN N'par.data_compression_desc ' ELSE N'null as data_compression_desc' END + N'
                         FROM    ' + QUOTENAME(@DatabaseName) + N'.sys.dm_db_partition_stats AS ps  
                         JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.partitions AS par on ps.partition_id=par.partition_id
                         JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.objects AS so ON ps.object_id = so.object_id
                                    AND so.is_ms_shipped = 0 /*Exclude objects shipped by Microsoft*/
                                    AND so.type <> ''TF'' /*Exclude table valued functions*/
+						JOIN ' + QUOTENAME(@DatabaseName) + '.sys.schemas AS s ON s.schema_id = so.schema_id
                         OUTER APPLY ' + QUOTENAME(@DatabaseName) + N'.sys.dm_db_index_operational_stats('
                     + CAST(@DatabaseID AS NVARCHAR(10)) + N', ps.object_id, ps.index_id,ps.partition_number) AS os
                         WHERE 1=1 
@@ -1127,6 +1213,7 @@ BEGIN TRY
         RAISERROR (N'Inserting data into #IndexPartitionSanity',0,1) WITH NOWAIT;
         INSERT    #IndexPartitionSanity ( [database_id],
                                           [object_id], 
+										  [schema_name],
                                           index_id, 
                                           partition_number, 
                                           row_count, 
@@ -1150,74 +1237,21 @@ BEGIN TRY
                                           page_lock_wait_count,
                                           page_lock_wait_in_ms, 
                                           index_lock_promotion_attempt_count,
-                                          index_lock_promotion_count, 
+                                          index_lock_promotion_count,
+								          page_latch_wait_count,
+								          page_latch_wait_in_ms,
+								          page_io_latch_wait_count,								
+								          page_io_latch_wait_in_ms,										   
                                           data_compression_desc )
                 EXEC sp_executesql @dsql;
         
-        RAISERROR (N'Updating index_sanity_id on #IndexPartitionSanity',0,1) WITH NOWAIT;
-        UPDATE    #IndexPartitionSanity
-        SET        index_sanity_id = i.index_sanity_id
-        FROM #IndexPartitionSanity ps
-                JOIN #IndexSanity i ON ps.[object_id] = i.[object_id]
-                                        AND ps.index_id = i.index_id
-                                        AND i.database_id = ps.database_id
 		END; --End Check For @SkipPartitions = 0
 
 
-        RAISERROR (N'Inserting data into #IndexSanitySize',0,1) WITH NOWAIT;
-        INSERT    #IndexSanitySize ( [index_sanity_id], [database_id], partition_count, total_rows, total_reserved_MB,
-                                     total_reserved_LOB_MB, total_reserved_row_overflow_MB, total_range_scan_count,
-                                     total_singleton_lookup_count, total_leaf_delete_count, total_leaf_update_count, 
-                                     total_forwarded_fetch_count,total_row_lock_count,
-                                     total_row_lock_wait_count, total_row_lock_wait_in_ms, avg_row_lock_wait_in_ms,
-                                     total_page_lock_count, total_page_lock_wait_count, total_page_lock_wait_in_ms,
-                                     avg_page_lock_wait_in_ms, total_index_lock_promotion_attempt_count, 
-                                     total_index_lock_promotion_count, data_compression_desc )
-                SELECT    index_sanity_id, ipp.database_id, COUNT(*), SUM(row_count), SUM(reserved_MB), SUM(reserved_LOB_MB),
-                        SUM(reserved_row_overflow_MB), 
-                        SUM(range_scan_count),
-                        SUM(singleton_lookup_count),
-                        SUM(leaf_delete_count), 
-                        SUM(leaf_update_count),
-                        SUM(forwarded_fetch_count),
-                        SUM(row_lock_count), 
-                        SUM(row_lock_wait_count),
-                        SUM(row_lock_wait_in_ms), 
-                        CASE WHEN SUM(row_lock_wait_in_ms) > 0 THEN
-                            SUM(row_lock_wait_in_ms)/(1.*SUM(row_lock_wait_count))
-                        ELSE 0 END AS avg_row_lock_wait_in_ms,           
-                        SUM(page_lock_count), 
-                        SUM(page_lock_wait_count),
-                        SUM(page_lock_wait_in_ms), 
-                        CASE WHEN SUM(page_lock_wait_in_ms) > 0 THEN
-                            SUM(page_lock_wait_in_ms)/(1.*SUM(page_lock_wait_count))
-                        ELSE 0 END AS avg_page_lock_wait_in_ms,           
-                        SUM(index_lock_promotion_attempt_count),
-                        SUM(index_lock_promotion_count),
-                        LEFT(MAX(data_compression_info.data_compression_rollup),8000)
-                FROM #IndexPartitionSanity ipp
-                /* individual partitions can have distinct compression settings, just roll them into a list here*/
-                OUTER APPLY (SELECT STUFF((
-                    SELECT    N', ' + data_compression_desc
-                    FROM #IndexPartitionSanity ipp2
-                    WHERE ipp.[object_id]=ipp2.[object_id]
-                        AND ipp.[index_id]=ipp2.[index_id]
-                        AND ipp.database_id = @DatabaseID
-                    ORDER BY ipp2.partition_number
-                    FOR      XML PATH(''),TYPE).value('.', 'varchar(max)'), 1, 1, '')) 
-                        data_compression_info(data_compression_rollup)
-                WHERE ipp.database_id = @DatabaseID
-                GROUP BY index_sanity_id, ipp.database_id
-                ORDER BY index_sanity_id 
-        OPTION    ( RECOMPILE );
-
-        RAISERROR (N'Adding UQ index on #IndexSanity (database_id, object_id, index_id)',0,1) WITH NOWAIT;
-        IF NOT EXISTS(SELECT 1 FROM tempdb.sys.indexes WHERE name='uq_database_id_object_id_index_id') 
-            CREATE UNIQUE INDEX uq_database_id_object_id_index_id ON #IndexSanity (database_id, object_id, index_id);
 
         RAISERROR (N'Inserting data into #MissingIndexes',0,1) WITH NOWAIT;
         SET @dsql=N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-                SELECT    id.object_id, ' + QUOTENAME(@DatabaseName,'''') + N', sc.[name], so.[name], id.statement , gs.avg_total_user_cost, 
+                SELECT  id.database_id, id.object_id, @i_DatabaseName, sc.[name], so.[name], id.statement , gs.avg_total_user_cost, 
                         gs.avg_user_impact, gs.user_seeks, gs.user_scans, gs.unique_compiles,id.equality_columns, 
                         id.inequality_columns,id.included_columns
                 FROM    sys.dm_db_missing_index_groups ig
@@ -1231,17 +1265,19 @@ BEGIN TRY
                 ' + CASE WHEN @ObjectID IS NULL THEN N'' 
                     ELSE N'and id.object_id=' + CAST(@ObjectID AS NVARCHAR(30)) 
                 END +
-        N';'
+        N'OPTION (RECOMPILE);';
 
         IF @dsql IS NULL 
             RAISERROR('@dsql is null',16,1);
-        INSERT    #MissingIndexes ( [object_id], [database_name], [schema_name], [table_name], [statement], avg_total_user_cost, 
+        INSERT    #MissingIndexes ( [database_id], [object_id], [database_name], [schema_name], [table_name], [statement], avg_total_user_cost, 
                                     avg_user_impact, user_seeks, user_scans, unique_compiles, equality_columns, 
-                                    inequality_columns,included_columns)
-        EXEC sp_executesql @dsql;
+                                    inequality_columns, included_columns)
+        EXEC sp_executesql @dsql, @params = N'@i_DatabaseName NVARCHAR(128)', @i_DatabaseName = @DatabaseName;
 
         SET @dsql = N'
-            SELECT ' + QUOTENAME(@DatabaseName,'''')  + N' AS [database_name],
+            SELECT DB_ID(N' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], 
+			    @i_DatabaseName AS database_name,
+				s.name,
                 fk_object.name AS foreign_key_name,
                 parent_object.[object_id] AS parent_object_id,
                 parent_object.name AS parent_object_name,
@@ -1258,7 +1294,8 @@ BEGIN TRY
             JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.objects fk_object ON fk.object_id=fk_object.object_id
             JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.objects parent_object ON fk.parent_object_id=parent_object.object_id
             JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.objects referenced_object ON fk.referenced_object_id=referenced_object.object_id
-            CROSS APPLY ( SELECT    STUFF( (SELECT    N'', '' + c_parent.name AS fk_columns
+			JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.schemas AS s ON fk.schema_id=s.schema_id
+            CROSS APPLY ( SELECT  STUFF( (SELECT  N'', '' + c_parent.name AS fk_columns
                                             FROM    ' + QUOTENAME(@DatabaseName) + N'.sys.foreign_key_columns fkc 
                                             JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.columns c_parent ON fkc.parent_object_id=c_parent.[object_id]
                                                 AND fkc.parent_column_id=c_parent.column_id
@@ -1266,8 +1303,8 @@ BEGIN TRY
                                                 AND fk.[object_id]=fkc.constraint_object_id
                                             ORDER BY fkc.constraint_column_id 
                                     FOR      XML PATH('''') ,
-                                              TYPE).value(''.'', ''varchar(max)''), 1, 1, '''')/*This is how we remove the first comma*/ ) parent ( fk_columns )
-            CROSS APPLY ( SELECT    STUFF( (SELECT    N'', '' + c_referenced.name AS fk_columns
+                                              TYPE).value(''.'', ''nvarchar(max)''), 1, 1, '''')/*This is how we remove the first comma*/ ) parent ( fk_columns )
+            CROSS APPLY ( SELECT  STUFF( (SELECT  N'', '' + c_referenced.name AS fk_columns
                                             FROM    ' + QUOTENAME(@DatabaseName) + N'.sys.    foreign_key_columns fkc 
                                             JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.columns c_referenced ON fkc.referenced_object_id=c_referenced.[object_id]
                                                 AND fkc.referenced_column_id=c_referenced.column_id
@@ -1275,265 +1312,240 @@ BEGIN TRY
                                                 and fk.[object_id]=fkc.constraint_object_id
                                             ORDER BY fkc.constraint_column_id  /*order by col name, we don''t have anything better*/
                                     FOR      XML PATH('''') ,
-                                              TYPE).value(''.'', ''varchar(max)''), 1, 1, '''') ) referenced ( fk_columns )
+                                              TYPE).value(''.'', ''nvarchar(max)''), 1, 1, '''') ) referenced ( fk_columns )
             ' + CASE WHEN @ObjectID IS NOT NULL THEN 
                     'WHERE fk.parent_object_id=' + CAST(@ObjectID AS NVARCHAR(30)) + N' OR fk.referenced_object_id=' + CAST(@ObjectID AS NVARCHAR(30)) + N' ' 
                     ELSE N' ' END + '
-            ORDER BY parent_object_name, foreign_key_name;
-        ';
+            ORDER BY parent_object_name, foreign_key_name
+			OPTION (RECOMPILE);';
         IF @dsql IS NULL 
             RAISERROR('@dsql is null',16,1);
 
         RAISERROR (N'Inserting data into #ForeignKeys',0,1) WITH NOWAIT;
-        INSERT  #ForeignKeys ( [database_name], foreign_key_name, parent_object_id,parent_object_name, referenced_object_id, referenced_object_name,
+        INSERT  #ForeignKeys ( [database_id], [database_name], [schema_name], foreign_key_name, parent_object_id,parent_object_name, referenced_object_id, referenced_object_name,
                                 is_disabled, is_not_trusted, is_not_for_replication, parent_fk_columns, referenced_fk_columns,
                                 [update_referential_action_desc], [delete_referential_action_desc] )
-                EXEC sp_executesql @dsql;
-
-        RAISERROR (N'Updating #IndexSanity.referenced_by_foreign_key',0,1) WITH NOWAIT;
-        UPDATE #IndexSanity
-            SET is_referenced_by_foreign_key=1
-        FROM #IndexSanity s
-        JOIN #ForeignKeys fk ON 
-            s.object_id=fk.referenced_object_id
-            AND LEFT(s.key_column_names,LEN(fk.referenced_fk_columns)) = fk.referenced_fk_columns
-
-        RAISERROR (N'Update index_secret on #IndexSanity for NC indexes.',0,1) WITH NOWAIT;
-        UPDATE nc 
-        SET secret_columns=
-            N'[' + 
-            CASE tb.count_key_columns WHEN 0 THEN '1' ELSE CAST(tb.count_key_columns AS VARCHAR(10)) END +
-            CASE nc.is_unique WHEN 1 THEN N' INCLUDE' ELSE N' KEY' END +
-            CASE WHEN tb.count_key_columns > 1 THEN  N'S] ' ELSE N'] ' END +
-            CASE tb.index_id WHEN 0 THEN '[RID]' ELSE LTRIM(tb.key_column_names) +
-                /* Uniquifiers only needed on non-unique clustereds-- not heaps */
-                CASE tb.is_unique WHEN 0 THEN ' [UNIQUIFIER]' ELSE N'' END
-            END
-            , count_secret_columns=
-            CASE tb.index_id WHEN 0 THEN 1 ELSE 
-                tb.count_key_columns +
-                    CASE tb.is_unique WHEN 0 THEN 1 ELSE 0 END
-            END
-        FROM #IndexSanity AS nc
-        JOIN #IndexSanity AS tb ON nc.object_id=tb.object_id
-            AND tb.index_id IN (0,1) 
-        WHERE nc.index_id > 1;
-
-        RAISERROR (N'Update index_secret on #IndexSanity for heaps and non-unique clustered.',0,1) WITH NOWAIT;
-        UPDATE tb
-        SET secret_columns=    CASE tb.index_id WHEN 0 THEN '[RID]' ELSE '[UNIQUIFIER]' END
-            , count_secret_columns = 1
-        FROM #IndexSanity AS tb
-        WHERE tb.index_id = 0 /*Heaps-- these have the RID */
-            OR (tb.index_id=1 AND tb.is_unique=0); /* Non-unique CX: has uniquifer (when needed) */
+                EXEC sp_executesql @dsql, @params = N'@i_DatabaseName NVARCHAR(128)', @i_DatabaseName = @DatabaseName;
 
 
-        RAISERROR (N'Populate #IndexCreateTsql.',0,1) WITH NOWAIT;
-        INSERT #IndexCreateTsql (index_sanity_id, create_tsql)
-        SELECT
-            index_sanity_id,
-            ISNULL (
-            /* Script drops for disabled non-clustered indexes*/
-            CASE WHEN is_disabled = 1 AND index_id <> 1
-                THEN N'--DROP INDEX ' + QUOTENAME([index_name]) + N' ON '
-                 + QUOTENAME([schema_name]) + N'.' + QUOTENAME([object_name]) 
-            ELSE
-                CASE index_id WHEN 0 THEN N'--I''m a Heap!' 
-                ELSE 
-                    CASE WHEN is_XML = 1 OR is_spatial=1 THEN N'' /* Not even trying for these just yet...*/
-                    ELSE 
-                        CASE WHEN is_primary_key=1 THEN
-                            N'ALTER TABLE ' + QUOTENAME([schema_name]) +
-                                N'.' + QUOTENAME([object_name]) + 
-                                N' ADD CONSTRAINT [' +
-                                index_name + 
-                                N'] PRIMARY KEY ' + 
-                                CASE WHEN index_id=1 THEN N'CLUSTERED (' ELSE N'(' END +
-                                key_column_names_with_sort_order_no_types + N' )' 
-                            WHEN is_CX_columnstore= 1 THEN
-                                 N'CREATE CLUSTERED COLUMNSTORE INDEX ' + QUOTENAME(index_name) + N' on ' + QUOTENAME([schema_name]) + '.' + QUOTENAME([object_name])
-                        ELSE /*Else not a PK or cx columnstore */ 
-                            N'CREATE ' + 
-                            CASE WHEN is_unique=1 THEN N'UNIQUE ' ELSE N'' END +
-                            CASE WHEN index_id=1 THEN N'CLUSTERED ' ELSE N'' END +
-                            CASE WHEN is_NC_columnstore=1 THEN N'NONCLUSTERED COLUMNSTORE ' 
-                            ELSE N'' END +
-                            N'INDEX ['
-                                 + index_name + N'] ON ' + 
-                                QUOTENAME([schema_name]) + '.' + QUOTENAME([object_name]) + 
-                                    CASE WHEN is_NC_columnstore=1 THEN 
-                                        N' (' + ISNULL(include_column_names_no_types,'') +  N' )' 
-                                    ELSE /*Else not colunnstore */ 
-                                        N' (' + ISNULL(key_column_names_with_sort_order_no_types,'') +  N' )' 
-                                        + CASE WHEN include_column_names_no_types IS NOT NULL THEN 
-                                            N' INCLUDE (' + include_column_names_no_types + N')' 
-                                            ELSE N'' 
-                                        END
-                                    END /*End non-colunnstore case */ 
-                                + CASE WHEN filter_definition <> N'' THEN N' WHERE ' + filter_definition ELSE N'' END
-                            END /*End Non-PK index CASE */ 
-                        + CASE WHEN is_NC_columnstore=0 AND is_CX_columnstore=0 THEN
-                            N' WITH (' 
-                                + N'FILLFACTOR=' + CASE fill_factor WHEN 0 THEN N'100' ELSE CAST(fill_factor AS NVARCHAR(5)) END + ', '
-                                + N'ONLINE=?, SORT_IN_TEMPDB=?'
-                            + N')'
-                        ELSE N'' END
-                        + N';'
-                      END /*End non-spatial and non-xml CASE */ 
-                END
-            END, '[Unknown Error]')
-                AS create_tsql
-        FROM #IndexSanity
-        WHERE database_id = @DatabaseID;
-
-	 ;WITH    [maps]
-			  AS ( SELECT   
-							index_sanity_id,
-							partition_number,
-							data_compression_desc,
-							partition_number - ROW_NUMBER() OVER (PARTITION BY ips.index_sanity_id, data_compression_desc ORDER BY partition_number ) AS [rN]
-				   FROM     #IndexPartitionSanity ips
-					),
-			[grps]
-			  AS ( SELECT   MIN([maps].[partition_number]) AS [MinKey] ,
-							MAX([maps].[partition_number]) AS [MaxKey] ,
-							index_sanity_id,
-							maps.data_compression_desc
-				   FROM     [maps]
-				   GROUP BY [maps].[rN], index_sanity_id, maps.data_compression_desc)
-		INSERT #PartitionCompressionInfo
-				(index_sanity_id, partition_compression_detail)
-		SELECT DISTINCT grps.index_sanity_id , SUBSTRING((  STUFF((SELECT ', ' + ' Partition'
-													+ CASE WHEN [grps2].[MinKey] < [grps2].[MaxKey]
-														   THEN +'s '
-																+ CAST([grps2].[MinKey] AS VARCHAR)
-																+ ' - '
-																+ CAST([grps2].[MaxKey] AS VARCHAR)
-																+ ' use ' + grps2.data_compression_desc
-														   ELSE ' '
-																+ CAST([grps2].[MinKey] AS VARCHAR)
-																+ ' uses '  + grps2.data_compression_desc
-													  END AS [Partitions]
-											 FROM   [grps] AS grps2
-											 WHERE grps2.index_sanity_id = grps.index_sanity_id
-											 ORDER BY grps2.MinKey, grps2.MaxKey
-									FOR     XML PATH('') ,
-												TYPE 
-							).[value]('.', 'VARCHAR(MAX)'), 1, 1, '') ), 0, 8000) AS [partition_compression_detail]
-		FROM grps;
-
-		UPDATE sz
-		SET sz.data_compression_desc = pci.partition_compression_detail
-		FROM #IndexSanitySize sz
-		JOIN #PartitionCompressionInfo AS pci
-		ON pci.index_sanity_id = sz.index_sanity_id;
-                  
-
-
-
+		IF @SkipStatistics = 0 
+			BEGIN
 		IF  ((PARSENAME(@SQLServerProductVersion, 4) >= 12)
 		OR   (PARSENAME(@SQLServerProductVersion, 4) = 11 AND PARSENAME(@SQLServerProductVersion, 2) >= 3000)
 		OR   (PARSENAME(@SQLServerProductVersion, 4) = 10 AND PARSENAME(@SQLServerProductVersion, 3) = 50 AND PARSENAME(@SQLServerProductVersion, 2) >= 2500))
 		BEGIN
 		RAISERROR (N'Gathering Statistics Info With Newer Syntax.',0,1) WITH NOWAIT;
 		SET @dsql=N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-					SELECT  ' + QUOTENAME(@DatabaseName,'''') + N' AS database_name,
-					OBJECT_NAME(s.object_id) AS table_name,
-			        ISNULL(i.name, ''System Statistic'') AS index_name,
-			        c.name AS column_name,
+				SELECT DB_ID(N' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], 
+				    @i_DatabaseName AS database_name,
+					obj.name AS table_name,
+					sch.name AS schema_name,
+			        ISNULL(i.name, ''System Or User Statistic'') AS index_name,
+			        ca.column_names AS column_names,
 			        s.name AS statistics_name,
 			        CONVERT(DATETIME, ddsp.last_updated) AS last_statistics_update,
 			        DATEDIFF(DAY, ddsp.last_updated, GETDATE()) AS days_since_last_stats_update,
 			        ddsp.rows,
 			        ddsp.rows_sampled,
-			        CAST(ddsp.rows_sampled / ( 1. * ddsp.rows ) * 100 AS DECIMAL(18, 1)) AS percent_sampled,
+			        CAST(ddsp.rows_sampled / ( 1. * NULLIF(ddsp.rows, 0) ) * 100 AS DECIMAL(18, 1)) AS percent_sampled,
 			        ddsp.steps AS histogram_steps,
 			        ddsp.modification_counter,
 			        CASE WHEN ddsp.modification_counter > 0
-			             THEN CAST(ddsp.modification_counter / ( 1. * ddsp.rows ) * 100 AS DECIMAL(18, 1))
+			             THEN CAST(ddsp.modification_counter / ( 1. * NULLIF(ddsp.rows, 0) ) * 100 AS DECIMAL(18, 1))
 			             ELSE ddsp.modification_counter
 			        END AS percent_modifications,
 			        CASE WHEN ddsp.rows < 500 THEN 500
 			             ELSE CAST(( ddsp.rows * .20 ) + 500 AS INT)
 			        END AS modifications_before_auto_update,
-			        ISNULL(i.type_desc, ''System Statistic - N/A'') AS index_type_desc,
+			        ISNULL(i.type_desc, ''System Or User Statistic - N/A'') AS index_type_desc,
 			        CONVERT(DATETIME, obj.create_date) AS table_create_date,
-			        CONVERT(DATETIME, obj.modify_date) AS table_modify_date
+			        CONVERT(DATETIME, obj.modify_date) AS table_modify_date,
+					s.no_recompute,
+					s.has_filter,
+					s.filter_definition
 			FROM    ' + QUOTENAME(@DatabaseName) + N'.sys.stats AS s
-			JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.stats_columns sc
-			ON      sc.object_id = s.object_id
-			        AND sc.stats_id = s.stats_id
-			JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.columns c
-			ON      c.object_id = sc.object_id
-			        AND c.column_id = sc.column_id
 			JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.objects obj
 			ON      s.object_id = obj.object_id
+			JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.schemas sch
+			ON		sch.schema_id = obj.schema_id
 			LEFT JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.indexes AS i
 			ON      i.object_id = s.object_id
 			        AND i.index_id = s.stats_id
-			CROSS APPLY ' + QUOTENAME(@DatabaseName) + N'.sys.dm_db_stats_properties(s.object_id, s.stats_id) AS ddsp
-			WHERE obj.is_ms_shipped = 0;'
+			OUTER APPLY ' + QUOTENAME(@DatabaseName) + N'.sys.dm_db_stats_properties(s.object_id, s.stats_id) AS ddsp
+			CROSS APPLY ( SELECT  STUFF((SELECT   '', '' + c.name
+						  FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.stats_columns AS sc
+						  JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.columns AS c
+						  ON       sc.column_id = c.column_id AND sc.object_id = c.object_id
+						  WHERE    sc.stats_id = s.stats_id AND sc.object_id = s.object_id
+						  ORDER BY sc.stats_column_id
+						  FOR   XML PATH(''''), TYPE).value(''.'', ''nvarchar(max)''), 1, 2, '''') 
+						) ca (column_names)
+			WHERE obj.is_ms_shipped = 0
+			OPTION (RECOMPILE);';
 			
 			IF @dsql IS NULL 
             RAISERROR('@dsql is null',16,1);
 
 			RAISERROR (N'Inserting data into #Statistics',0,1) WITH NOWAIT;
-			INSERT #Statistics ( database_name, table_name, index_name, column_name, statistics_name, last_statistics_update, 
+			INSERT #Statistics ( database_id, database_name, table_name, schema_name, index_name, column_names, statistics_name, last_statistics_update, 
 								days_since_last_stats_update, rows, rows_sampled, percent_sampled, histogram_steps, modification_counter, 
-								percent_modifications, modifications_before_auto_update, index_type_desc, table_create_date, table_modify_date)
+								percent_modifications, modifications_before_auto_update, index_type_desc, table_create_date, table_modify_date,
+								no_recompute, has_filter, filter_definition)
 			
-			EXEC sp_executesql @dsql;
-			
-			END
+			EXEC sp_executesql @dsql, @params = N'@i_DatabaseName NVARCHAR(128)', @i_DatabaseName = @DatabaseName;
+			END;
 			ELSE 
 			BEGIN
 			RAISERROR (N'Gathering Statistics Info With Older Syntax.',0,1) WITH NOWAIT;
 			SET @dsql=N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-						SELECT  ' + QUOTENAME(@DatabaseName,'''') + N' AS DatabaseName,
-								OBJECT_NAME(s.object_id) AS table_name,
-						        ISNULL(i.name, ''System Statistic'') AS index_name,
-						        c.name AS column_name,
+							SELECT DB_ID(N' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], 
+							    @i_DatabaseName AS database_name,
+								obj.name AS table_name,
+								sch.name AS schema_name,
+						        ISNULL(i.name, ''System Or User Statistic'') AS index_name,
+						        ca.column_names  AS column_names,
 						        s.name AS statistics_name,
-						        CONVERT(DATETIME, STATS_DATE(obj.object_id, i.index_id)) AS last_statistics_update,
-						        DATEDIFF(DAY, STATS_DATE(obj.object_id, i.index_id), GETDATE()) AS days_since_last_stats_update,
+						        CONVERT(DATETIME, STATS_DATE(s.object_id, s.stats_id)) AS last_statistics_update,
+						        DATEDIFF(DAY, STATS_DATE(s.object_id, s.stats_id), GETDATE()) AS days_since_last_stats_update,
 						        si.rowcnt,
 						        si.rowmodctr,
-						        CASE WHEN si.rowmodctr > 0 THEN CAST(si.rowmodctr / ( 1. * si.rowcnt ) * 100 AS DECIMAL(18, 1))
+						        CASE WHEN si.rowmodctr > 0 THEN CAST(si.rowmodctr / ( 1. * NULLIF(si.rowcnt, 0) ) * 100 AS DECIMAL(18, 1))
 						             ELSE si.rowmodctr
 						        END AS percent_modifications,
 						        CASE WHEN si.rowcnt < 500 THEN 500
 						             ELSE CAST(( si.rowcnt * .20 ) + 500 AS INT)
 						        END AS modifications_before_auto_update,
-						        ISNULL(i.type_desc, ''System Statistic - N/A'') AS index_type_desc,
+						        ISNULL(i.type_desc, ''System Or User Statistic - N/A'') AS index_type_desc,
 						        CONVERT(DATETIME, obj.create_date) AS table_create_date,
-						        CONVERT(DATETIME, obj.modify_date) AS table_modify_date
+						        CONVERT(DATETIME, obj.modify_date) AS table_modify_date,
+								s.no_recompute,
+								'
+								+ CASE WHEN @SQLServerProductVersion NOT LIKE '9%' 
+								THEN N's.has_filter,
+									   s.filter_definition' 
+								ELSE N'NULL AS has_filter,
+								       NULL AS filter_definition' END 
+						+ N'								
 						FROM    ' + QUOTENAME(@DatabaseName) + N'.sys.stats AS s
-						JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.sysindexes si
+						INNER HASH JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.sysindexes si
 						ON      si.name = s.name
-						JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.stats_columns sc
-						ON      sc.object_id = s.object_id
-						        AND sc.stats_id = s.stats_id
-						JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.columns c
-						ON      c.object_id = sc.object_id
-						        AND c.column_id = sc.column_id
-						JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.objects obj
+						INNER HASH JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.objects obj
 						ON      s.object_id = obj.object_id
-						LEFT JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.indexes AS i
+						INNER HASH JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.schemas sch
+						ON		sch.schema_id = obj.schema_id
+						LEFT HASH JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.indexes AS i
 						ON      i.object_id = s.object_id
 						        AND i.index_id = s.stats_id
-						WHERE obj.is_ms_shipped = 0;'
+						CROSS APPLY ( SELECT  STUFF((SELECT   '', '' + c.name
+									  FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.stats_columns AS sc
+									  JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.columns AS c
+									  ON       sc.column_id = c.column_id AND sc.object_id = c.object_id
+									  WHERE    sc.stats_id = s.stats_id AND sc.object_id = s.object_id
+									  ORDER BY sc.stats_column_id
+									  FOR   XML PATH(''''), TYPE).value(''.'', ''nvarchar(max)''), 1, 2, '''') 
+									) ca (column_names)
+						WHERE obj.is_ms_shipped = 0
+						AND si.rowcnt > 0
+						OPTION (RECOMPILE);';
 
 			IF @dsql IS NULL 
             RAISERROR('@dsql is null',16,1);
 
 			RAISERROR (N'Inserting data into #Statistics',0,1) WITH NOWAIT;
-			INSERT #Statistics(database_name, table_name, index_name, column_name, statistics_name, 
+			INSERT #Statistics(database_id, database_name, table_name, schema_name, index_name, column_names, statistics_name, 
 								last_statistics_update, days_since_last_stats_update, rows, modification_counter, 
-								percent_modifications, modifications_before_auto_update, index_type_desc, table_create_date, table_modify_date)
+								percent_modifications, modifications_before_auto_update, index_type_desc, table_create_date, table_modify_date,
+								no_recompute, has_filter, filter_definition)
 			
+			EXEC sp_executesql @dsql, @params = N'@i_DatabaseName NVARCHAR(128)', @i_DatabaseName = @DatabaseName;
+			END;
+
+			END;
+
+			IF  (PARSENAME(@SQLServerProductVersion, 4) >= 10)
+			BEGIN
+			RAISERROR (N'Gathering Computed Column Info.',0,1) WITH NOWAIT;
+			SET @dsql=N'SELECT DB_ID(@i_DatabaseName) AS [database_id], 
+							   @i_DatabaseName AS database_name,
+   					   		   t.name AS table_name,
+   					           s.name AS schema_name,
+   					           c.name AS column_name,
+   					           cc.is_nullable,
+   					           cc.definition,
+   					           cc.uses_database_collation,
+   					           cc.is_persisted,
+   					           cc.is_computed,
+   					   		   CASE WHEN cc.definition LIKE ''%.%'' THEN 1 ELSE 0 END AS is_function,
+   					   		   ''ALTER TABLE '' + QUOTENAME(s.name) + ''.'' + QUOTENAME(t.name) + 
+   					   		   '' ADD '' + QUOTENAME(c.name) + '' AS '' + cc.definition  + 
+							   CASE WHEN is_persisted = 1 THEN '' PERSISTED'' ELSE '''' END + '';'' COLLATE DATABASE_DEFAULT AS [column_definition]
+   					   FROM    ' + QUOTENAME(@DatabaseName) + N'.sys.computed_columns AS cc
+   					   JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.columns AS c
+   					   ON      cc.object_id = c.object_id
+   					   		   AND cc.column_id = c.column_id
+   					   JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.tables AS t
+   					   ON      t.object_id = cc.object_id
+   					   JOIN    ' + QUOTENAME(@DatabaseName) + N'.sys.schemas AS s
+   					   ON      s.schema_id = t.schema_id
+					   OPTION (RECOMPILE);';
+
+			IF @dsql IS NULL RAISERROR('@dsql is null',16,1);
+
+			INSERT #ComputedColumns
+			        ( database_id, [database_name], table_name, schema_name, column_name, is_nullable, definition, 
+					  uses_database_collation, is_persisted, is_computed, is_function, column_definition )			
+			EXEC sp_executesql @dsql, @params = N'@i_DatabaseName NVARCHAR(128)', @i_DatabaseName = @DatabaseName;
+
+			END; 
+			
+			RAISERROR (N'Gathering Trace Flag Information',0,1) WITH NOWAIT;
+			INSERT #TraceStatus
+			EXEC ('DBCC TRACESTATUS(-1) WITH NO_INFOMSGS');			
+
+			IF  (PARSENAME(@SQLServerProductVersion, 4) >= 13)
+			BEGIN
+			RAISERROR (N'Gathering Temporal Table Info',0,1) WITH NOWAIT;
+			SET @dsql=N'SELECT ' + QUOTENAME(@DatabaseName,'''') + N' AS database_name,
+								   DB_ID(N' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], 
+								   s.name AS schema_name,
+								   t.name AS table_name, 
+								   oa.hsn as history_schema_name,
+								   oa.htn AS history_table_name, 
+								   c1.name AS start_column_name,
+								   c2.name AS end_column_name,
+								   p.name AS period_name
+							FROM ' + QUOTENAME(@DatabaseName) + N'.sys.periods AS p
+							INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.tables AS t
+							ON  p.object_id = t.object_id
+							INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.columns AS c1
+							ON  t.object_id = c1.object_id
+							    AND p.start_column_id = c1.column_id
+							INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.columns AS c2
+							ON  t.object_id = c2.object_id
+							    AND p.end_column_id = c2.column_id
+							INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.schemas AS s
+							ON t.schema_id = s.schema_id
+							CROSS APPLY ( SELECT s2.name as hsn, t2.name htn
+							              FROM ' + QUOTENAME(@DatabaseName) + N'.sys.tables AS t2
+										  INNER JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.schemas AS s2
+										  ON t2.schema_id = s2.schema_id
+							              WHERE t2.object_id = t.history_table_id
+							              AND t2.temporal_type = 1 /*History table*/ ) AS oa
+							WHERE t.temporal_type IN ( 2, 4 ) /*BOL currently points to these types, but has no definition for 4*/
+							OPTION (RECOMPILE);
+							';
+			
+			IF @dsql IS NULL 
+			RAISERROR('@dsql is null',16,1);
+			
+			INSERT #TemporalTables ( database_name, database_id, schema_name, table_name, history_table_name, 
+									 history_schema_name, start_column_name, end_column_name, period_name )
+					
 			EXEC sp_executesql @dsql;
-			END
-END                    
+
+    END;
+			
+END;                    
 END TRY
 BEGIN CATCH
         RAISERROR (N'Failure populating temp tables.', 0,1) WITH NOWAIT;
@@ -1542,9 +1554,9 @@ BEGIN CATCH
         BEGIN
             SET @msg= 'Last @dsql: ' + @dsql;
             RAISERROR(@msg, 0, 1) WITH NOWAIT;
-        END
+        END;
 
-        SELECT    @msg = @DatabaseName + N' database failed to process. ' + ERROR_MESSAGE(), @ErrorSeverity = ERROR_SEVERITY(), @ErrorState = ERROR_STATE();
+        SELECT  @msg = @DatabaseName + N' database failed to process. ' + ERROR_MESSAGE(), @ErrorSeverity = ERROR_SEVERITY(), @ErrorState = ERROR_STATE();
         RAISERROR (@msg,@ErrorSeverity, @ErrorState )WITH NOWAIT;
         
         
@@ -1553,15 +1565,387 @@ BEGIN CATCH
 
         RETURN;
 END CATCH;
- FETCH NEXT FROM c1 INTO @DatabaseName
-END
+ FETCH NEXT FROM c1 INTO @DatabaseName;
+END;
 DEALLOCATE c1;
 
+
+
+
+
+
 ----------------------------------------
---STEP 2: DIAGNOSE THE PATIENT
+--STEP 2: PREP THE TEMP TABLES
 --EVERY QUERY AFTER THIS GOES AGAINST TEMP TABLES ONLY.
 ----------------------------------------
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                BEGIN TRY
+
+RAISERROR (N'Updating #IndexSanity.key_column_names',0,1) WITH NOWAIT;
+UPDATE    #IndexSanity
+SET        key_column_names = D1.key_column_names
+FROM    #IndexSanity si
+        CROSS APPLY ( SELECT  RTRIM(STUFF( (SELECT  N', ' + c.column_name 
+                            + N' {' + system_type_name + N' ' + CAST(max_length AS NVARCHAR(50)) +  N'}'
+                                AS col_definition
+                            FROM    #IndexColumns c
+                            WHERE    c.database_id= si.database_id
+									AND c.schema_name = si.schema_name
+                                    AND c.object_id = si.object_id
+                                    AND c.index_id = si.index_id
+                                    AND c.is_included_column = 0 /*Just Keys*/
+                                    AND c.key_ordinal > 0 /*Ignore non-key columns, such as partitioning keys*/
+                            ORDER BY c.object_id, c.index_id, c.key_ordinal    
+                    FOR      XML PATH('') ,TYPE).value('.', 'nvarchar(max)'), 1, 1, ''))
+                                ) D1 ( key_column_names );
+
+RAISERROR (N'Updating #IndexSanity.partition_key_column_name',0,1) WITH NOWAIT;
+UPDATE    #IndexSanity
+SET        partition_key_column_name = D1.partition_key_column_name
+FROM    #IndexSanity si
+        CROSS APPLY ( SELECT  RTRIM(STUFF( (SELECT  N', ' + c.column_name AS col_definition
+                            FROM    #IndexColumns c
+                            WHERE    c.database_id= si.database_id
+									AND c.schema_name = si.schema_name
+                                    AND c.object_id = si.object_id
+                                    AND c.index_id = si.index_id
+                                    AND c.partition_ordinal <> 0 /*Just Partitioned Keys*/
+                            ORDER BY c.object_id, c.index_id, c.key_ordinal    
+                    FOR      XML PATH('') , TYPE).value('.', 'nvarchar(max)'), 1, 1,''))) D1 
+                                ( partition_key_column_name );
+
+RAISERROR (N'Updating #IndexSanity.key_column_names_with_sort_order',0,1) WITH NOWAIT;
+UPDATE    #IndexSanity
+SET        key_column_names_with_sort_order = D2.key_column_names_with_sort_order
+FROM    #IndexSanity si
+        CROSS APPLY ( SELECT  RTRIM(STUFF( (SELECT  N', ' + c.column_name + CASE c.is_descending_key
+                            WHEN 1 THEN N' DESC'
+                            ELSE N''
+							END
+                        + N' {' + system_type_name + N' ' + CAST(max_length AS NVARCHAR(50)) +  N'}'
+                            AS col_definition
+                    FROM    #IndexColumns c
+                    WHERE    c.database_id= si.database_id
+							AND c.schema_name = si.schema_name
+                            AND c.object_id = si.object_id
+                            AND c.index_id = si.index_id
+                            AND c.is_included_column = 0 /*Just Keys*/
+                            AND c.key_ordinal > 0 /*Ignore non-key columns, such as partitioning keys*/
+                    ORDER BY c.object_id, c.index_id, c.key_ordinal    
+            FOR      XML PATH('') , TYPE).value('.', 'nvarchar(max)'), 1, 1, ''))
+            ) D2 ( key_column_names_with_sort_order );
+
+RAISERROR (N'Updating #IndexSanity.key_column_names_with_sort_order_no_types (for create tsql)',0,1) WITH NOWAIT;
+UPDATE    #IndexSanity
+SET        key_column_names_with_sort_order_no_types = D2.key_column_names_with_sort_order_no_types
+FROM    #IndexSanity si
+        CROSS APPLY ( SELECT  RTRIM(STUFF( (SELECT  N', ' + QUOTENAME(c.column_name) + CASE c.is_descending_key
+                            WHEN 1 THEN N' DESC'
+                            ELSE N''
+                        END AS col_definition
+                    FROM    #IndexColumns c
+                    WHERE    c.database_id= si.database_id
+							AND c.schema_name = si.schema_name
+                            AND c.object_id = si.object_id
+                            AND c.index_id = si.index_id
+                            AND c.is_included_column = 0 /*Just Keys*/
+                            AND c.key_ordinal > 0 /*Ignore non-key columns, such as partitioning keys*/
+                    ORDER BY c.object_id, c.index_id, c.key_ordinal    
+            FOR      XML PATH('') , TYPE).value('.', 'nvarchar(max)'), 1, 1, ''))
+            ) D2 ( key_column_names_with_sort_order_no_types );
+
+RAISERROR (N'Updating #IndexSanity.include_column_names',0,1) WITH NOWAIT;
+UPDATE    #IndexSanity
+SET        include_column_names = D3.include_column_names
+FROM    #IndexSanity si
+        CROSS APPLY ( SELECT  RTRIM(STUFF( (SELECT  N', ' + c.column_name
+                        + N' {' + system_type_name + N' ' + CAST(max_length AS NVARCHAR(50)) +  N'}'
+                        FROM    #IndexColumns c
+                        WHERE    c.database_id= si.database_id
+								AND c.schema_name = si.schema_name
+                                AND c.object_id = si.object_id
+                                AND c.index_id = si.index_id
+                                AND c.is_included_column = 1 /*Just includes*/
+                        ORDER BY c.column_name /*Order doesn't matter in includes, 
+                                this is here to make rows easy to compare.*/ 
+                FOR      XML PATH('') ,  TYPE).value('.', 'nvarchar(max)'), 1, 1, ''))
+                ) D3 ( include_column_names );
+
+RAISERROR (N'Updating #IndexSanity.include_column_names_no_types (for create tsql)',0,1) WITH NOWAIT;
+UPDATE    #IndexSanity
+SET        include_column_names_no_types = D3.include_column_names_no_types
+FROM    #IndexSanity si
+        CROSS APPLY ( SELECT  RTRIM(STUFF( (SELECT  N', ' + QUOTENAME(c.column_name)
+                        FROM    #IndexColumns c
+                                WHERE    c.database_id= si.database_id
+								AND c.schema_name = si.schema_name
+                                AND c.object_id = si.object_id
+                                AND c.index_id = si.index_id
+                                AND c.is_included_column = 1 /*Just includes*/
+                        ORDER BY c.column_name /*Order doesn't matter in includes, 
+                                this is here to make rows easy to compare.*/ 
+                FOR      XML PATH('') ,  TYPE).value('.', 'nvarchar(max)'), 1, 1, ''))
+                ) D3 ( include_column_names_no_types );
+
+RAISERROR (N'Updating #IndexSanity.count_key_columns and count_include_columns',0,1) WITH NOWAIT;
+UPDATE    #IndexSanity
+SET        count_included_columns = D4.count_included_columns,
+        count_key_columns = D4.count_key_columns
+FROM    #IndexSanity si
+        CROSS APPLY ( SELECT  SUM(CASE WHEN is_included_column = 'true' THEN 1
+                                            ELSE 0
+                                    END) AS count_included_columns,
+                                SUM(CASE WHEN is_included_column = 'false' AND c.key_ordinal > 0 THEN 1
+                                            ELSE 0
+                                    END) AS count_key_columns
+                        FROM        #IndexColumns c
+                            WHERE    c.database_id= si.database_id
+									AND c.schema_name = si.schema_name
+                                    AND c.object_id = si.object_id
+                                AND c.index_id = si.index_id 
+                                ) AS D4 ( count_included_columns, count_key_columns );
+
+RAISERROR (N'Updating index_sanity_id on #IndexPartitionSanity',0,1) WITH NOWAIT;
+UPDATE    #IndexPartitionSanity
+SET        index_sanity_id = i.index_sanity_id
+FROM #IndexPartitionSanity ps
+        JOIN #IndexSanity i ON ps.[object_id] = i.[object_id]
+                                AND ps.index_id = i.index_id
+                                AND i.database_id = ps.database_id
+								AND i.schema_name = ps.schema_name;
+
+
+RAISERROR (N'Inserting data into #IndexSanitySize',0,1) WITH NOWAIT;
+INSERT    #IndexSanitySize ( [index_sanity_id], [database_id], [schema_name], partition_count, total_rows, total_reserved_MB,
+                                total_reserved_LOB_MB, total_reserved_row_overflow_MB, total_range_scan_count,
+                                total_singleton_lookup_count, total_leaf_delete_count, total_leaf_update_count, 
+                                total_forwarded_fetch_count,total_row_lock_count,
+                                total_row_lock_wait_count, total_row_lock_wait_in_ms, avg_row_lock_wait_in_ms,
+                                total_page_lock_count, total_page_lock_wait_count, total_page_lock_wait_in_ms,
+                                avg_page_lock_wait_in_ms, total_index_lock_promotion_attempt_count, 
+                                total_index_lock_promotion_count, data_compression_desc, 
+								page_latch_wait_count, page_latch_wait_in_ms, page_io_latch_wait_count, page_io_latch_wait_in_ms)
+        SELECT  index_sanity_id, ipp.database_id, ipp.schema_name,						
+				COUNT(*), SUM(row_count), SUM(reserved_MB), SUM(reserved_LOB_MB),
+                SUM(reserved_row_overflow_MB), 
+                SUM(range_scan_count),
+                SUM(singleton_lookup_count),
+                SUM(leaf_delete_count), 
+                SUM(leaf_update_count),
+                SUM(forwarded_fetch_count),
+                SUM(row_lock_count), 
+                SUM(row_lock_wait_count),
+                SUM(row_lock_wait_in_ms), 
+                CASE WHEN SUM(row_lock_wait_in_ms) > 0 THEN
+                    SUM(row_lock_wait_in_ms)/(1.*SUM(row_lock_wait_count))
+                ELSE 0 END AS avg_row_lock_wait_in_ms,           
+                SUM(page_lock_count), 
+                SUM(page_lock_wait_count),
+                SUM(page_lock_wait_in_ms), 
+                CASE WHEN SUM(page_lock_wait_in_ms) > 0 THEN
+                    SUM(page_lock_wait_in_ms)/(1.*SUM(page_lock_wait_count))
+                ELSE 0 END AS avg_page_lock_wait_in_ms,           
+                SUM(index_lock_promotion_attempt_count),
+                SUM(index_lock_promotion_count),
+                LEFT(MAX(data_compression_info.data_compression_rollup),8000),
+				SUM(page_latch_wait_count), 
+				SUM(page_latch_wait_in_ms), 
+				SUM(page_io_latch_wait_count), 
+				SUM(page_io_latch_wait_in_ms)
+        FROM #IndexPartitionSanity ipp
+        /* individual partitions can have distinct compression settings, just roll them into a list here*/
+        OUTER APPLY (SELECT STUFF((
+            SELECT  N', ' + data_compression_desc
+            FROM #IndexPartitionSanity ipp2
+            WHERE ipp.[object_id]=ipp2.[object_id]
+                AND ipp.[index_id]=ipp2.[index_id]
+                AND ipp.database_id = ipp2.database_id
+				AND ipp.schema_name = ipp2.schema_name
+            ORDER BY ipp2.partition_number
+            FOR      XML PATH(''),TYPE).value('.', 'nvarchar(max)'), 1, 1, '')) 
+                data_compression_info(data_compression_rollup)
+        GROUP BY index_sanity_id, ipp.database_id, ipp.schema_name
+        ORDER BY index_sanity_id 
+OPTION    ( RECOMPILE );
+
+RAISERROR (N'Determining index usefulness',0,1) WITH NOWAIT;
+UPDATE #MissingIndexes 
+SET is_low = CASE WHEN (user_seeks + user_scans) < 10000 
+					OR avg_user_impact < 70. THEN 1
+					ELSE 0 
+				END;
+
+RAISERROR (N'Updating #IndexSanity.referenced_by_foreign_key',0,1) WITH NOWAIT;
+UPDATE #IndexSanity
+    SET is_referenced_by_foreign_key=1
+FROM #IndexSanity s
+JOIN #ForeignKeys fk ON 
+    s.object_id=fk.referenced_object_id
+    AND s.database_id=fk.database_id
+    AND LEFT(s.key_column_names,LEN(fk.referenced_fk_columns)) = fk.referenced_fk_columns;
+
+RAISERROR (N'Update index_secret on #IndexSanity for NC indexes.',0,1) WITH NOWAIT;
+UPDATE nc 
+SET secret_columns=
+    N'[' + 
+    CASE tb.count_key_columns WHEN 0 THEN '1' ELSE CAST(tb.count_key_columns AS NVARCHAR(10)) END +
+    CASE nc.is_unique WHEN 1 THEN N' INCLUDE' ELSE N' KEY' END +
+    CASE WHEN tb.count_key_columns > 1 THEN  N'S] ' ELSE N'] ' END +
+    CASE tb.index_id WHEN 0 THEN '[RID]' ELSE LTRIM(tb.key_column_names) +
+        /* Uniquifiers only needed on non-unique clustereds-- not heaps */
+        CASE tb.is_unique WHEN 0 THEN ' [UNIQUIFIER]' ELSE N'' END
+    END
+    , count_secret_columns=
+    CASE tb.index_id WHEN 0 THEN 1 ELSE 
+        tb.count_key_columns +
+            CASE tb.is_unique WHEN 0 THEN 1 ELSE 0 END
+    END
+FROM #IndexSanity AS nc
+JOIN #IndexSanity AS tb ON nc.object_id=tb.object_id
+	AND nc.database_id = tb.database_id
+	AND nc.schema_name = tb.schema_name
+    AND tb.index_id IN (0,1) 
+WHERE nc.index_id > 1;
+
+RAISERROR (N'Update index_secret on #IndexSanity for heaps and non-unique clustered.',0,1) WITH NOWAIT;
+UPDATE tb
+SET secret_columns=    CASE tb.index_id WHEN 0 THEN '[RID]' ELSE '[UNIQUIFIER]' END
+    , count_secret_columns = 1
+FROM #IndexSanity AS tb
+WHERE tb.index_id = 0 /*Heaps-- these have the RID */
+    OR (tb.index_id=1 AND tb.is_unique=0); /* Non-unique CX: has uniquifer (when needed) */
+
+
+RAISERROR (N'Populate #IndexCreateTsql.',0,1) WITH NOWAIT;
+INSERT #IndexCreateTsql (index_sanity_id, create_tsql)
+SELECT
+    index_sanity_id,
+    ISNULL (
+    /* Script drops for disabled non-clustered indexes*/
+    CASE WHEN is_disabled = 1 AND index_id <> 1
+         THEN N'--DROP INDEX ' + QUOTENAME([index_name]) + N' ON '
+            + QUOTENAME([schema_name]) + N'.' + QUOTENAME([object_name])
+		 WHEN index_name LIKE '[_]dta[_]index%'
+		 THEN N'-- EXEC sys.sp_rename @objname = N' + QUOTENAME(db_schema_object_name + N'.' + index_name, N'''') + NCHAR(10) + 
+		                          N', @newname = N' + QUOTENAME(LEFT(N'ix_' + [object_name] 
+								                      + REPLACE(REPLACE(REPLACE(REPLACE(key_column_names_with_sort_order_no_types, N' ', N'_'), N'[', N''), N']', N''), ',', '')
+													  + CASE WHEN count_included_columns > 0 THEN N'_Includes' ELSE N'' END, 128), '''') + NCHAR(10) + 
+								  N', @objtype = N' + QUOTENAME(N'INDEX', '''')
+    ELSE
+        CASE index_id WHEN 0 THEN N'ALTER TABLE ' + QUOTENAME([database_name]) + N'.' + QUOTENAME([schema_name]) + N'.' + QUOTENAME([object_name])  + ' REBUILD;'
+        ELSE 
+            CASE WHEN is_XML = 1 OR is_spatial=1 THEN N'' /* Not even trying for these just yet...*/
+            ELSE 
+                CASE WHEN is_primary_key=1 THEN
+                    N'ALTER TABLE ' + QUOTENAME([schema_name]) +
+                        N'.' + QUOTENAME([object_name]) + 
+                        N' ADD CONSTRAINT [' +
+                        index_name + 
+                        N'] PRIMARY KEY ' + 
+                        CASE WHEN index_id=1 THEN N'CLUSTERED (' ELSE N'(' END +
+                        key_column_names_with_sort_order_no_types + N' )' 
+                    WHEN is_CX_columnstore= 1 THEN
+                            N'CREATE CLUSTERED COLUMNSTORE INDEX ' + QUOTENAME(index_name) + N' on ' + QUOTENAME([schema_name]) + '.' + QUOTENAME([object_name])
+                ELSE /*Else not a PK or cx columnstore */ 
+                    N'CREATE ' + 
+                    CASE WHEN is_unique=1 THEN N'UNIQUE ' ELSE N'' END +
+                    CASE WHEN index_id=1 THEN N'CLUSTERED ' ELSE N'' END +
+                    CASE WHEN is_NC_columnstore=1 THEN N'NONCLUSTERED COLUMNSTORE ' 
+                    ELSE N'' END +
+                    N'INDEX ['
+                            + index_name + N'] ON ' + 
+                        QUOTENAME([schema_name]) + '.' + QUOTENAME([object_name]) + 
+                            CASE WHEN is_NC_columnstore=1 THEN 
+                                N' (' + ISNULL(include_column_names_no_types,'') +  N' )' 
+                            ELSE /*Else not colunnstore */ 
+                                N' (' + ISNULL(key_column_names_with_sort_order_no_types,'') +  N' )' 
+                                + CASE WHEN include_column_names_no_types IS NOT NULL THEN 
+                                    N' INCLUDE (' + include_column_names_no_types + N')' 
+                                    ELSE N'' 
+                                END
+                            END /*End non-colunnstore case */ 
+                        + CASE WHEN filter_definition <> N'' THEN N' WHERE ' + filter_definition ELSE N'' END
+                    END /*End Non-PK index CASE */ 
+                + CASE WHEN is_NC_columnstore=0 AND is_CX_columnstore=0 THEN
+                    N' WITH (' 
+                        + N'FILLFACTOR=' + CASE fill_factor WHEN 0 THEN N'100' ELSE CAST(fill_factor AS NVARCHAR(5)) END + ', '
+                        + N'ONLINE=?, SORT_IN_TEMPDB=?, DATA_COMPRESSION=?'
+                    + N')'
+                ELSE N'' END
+                + N';'
+                END /*End non-spatial and non-xml CASE */ 
+        END
+    END, '[Unknown Error]')
+        AS create_tsql
+FROM #IndexSanity;
+	  
+RAISERROR (N'Populate #PartitionCompressionInfo.',0,1) WITH NOWAIT;
+;WITH    [maps]
+		AS ( SELECT   
+					index_sanity_id,
+					partition_number,
+					data_compression_desc,
+					partition_number - ROW_NUMBER() OVER (PARTITION BY ips.index_sanity_id, data_compression_desc ORDER BY partition_number ) AS [rN]
+			FROM    #IndexPartitionSanity ips
+			),
+	[grps]
+		AS ( SELECT MIN([maps].[partition_number]) AS [MinKey] ,
+					MAX([maps].[partition_number]) AS [MaxKey] ,
+					index_sanity_id,
+					maps.data_compression_desc
+			FROM     [maps]
+			GROUP BY [maps].[rN], index_sanity_id, maps.data_compression_desc)
+INSERT #PartitionCompressionInfo
+		(index_sanity_id, partition_compression_detail)
+SELECT DISTINCT grps.index_sanity_id , 
+                SUBSTRING((  STUFF((SELECT N', ' + N' Partition'
+				               + CASE WHEN [grps2].[MinKey] < [grps2].[MaxKey]
+				                 THEN + N's '
+				               + CAST([grps2].[MinKey] AS NVARCHAR(10))
+				               + N' - '
+				               + CAST([grps2].[MaxKey] AS NVARCHAR(10))
+				               + N' use ' + grps2.data_compression_desc
+				                 ELSE N' '
+				               + CAST([grps2].[MinKey] AS NVARCHAR(10))
+				               + N' uses '  + grps2.data_compression_desc
+				               END AS [Partitions]
+				  FROM   [grps] AS grps2
+				  WHERE grps2.index_sanity_id = grps.index_sanity_id
+				  ORDER BY grps2.MinKey, grps2.MaxKey
+				  FOR     XML PATH('') ,
+				  TYPE 
+				).[value]('.', 'NVARCHAR(MAX)'), 1, 1, '') ), 0, 8000) AS [partition_compression_detail]
+FROM grps;
+		
+RAISERROR (N'Update #PartitionCompressionInfo.',0,1) WITH NOWAIT;
+UPDATE sz
+SET sz.data_compression_desc = pci.partition_compression_detail
+FROM #IndexSanitySize sz
+JOIN #PartitionCompressionInfo AS pci
+ON pci.index_sanity_id = sz.index_sanity_id;
+
+
+/*This is for debugging*/ 
+--SELECT '#IndexSanity' AS table_name, * FROM  #IndexSanity;
+--SELECT '#IndexPartitionSanity' AS table_name, * FROM  #IndexPartitionSanity;
+--SELECT '#IndexSanitySize' AS table_name, * FROM  #IndexSanitySize;
+--SELECT '#IndexColumns' AS table_name, * FROM  #IndexColumns;
+--SELECT '#MissingIndexes' AS table_name, * FROM  #MissingIndexes;
+--SELECT '#ForeignKeys' AS table_name, * FROM  #ForeignKeys;
+--SELECT '#BlitzIndexResults' AS table_name, * FROM  #BlitzIndexResults;
+--SELECT '#IndexCreateTsql' AS table_name, * FROM  #IndexCreateTsql;
+--SELECT '#DatabaseList' AS table_name, * FROM  #DatabaseList;
+--SELECT '#Statistics' AS table_name, * FROM  #Statistics;
+--SELECT '#PartitionCompressionInfo' AS table_name, * FROM  #PartitionCompressionInfo;
+--SELECT '#ComputedColumns' AS table_name, * FROM  #ComputedColumns;
+--SELECT '#TraceStatus' AS table_name, * FROM  #TraceStatus;                   
+/*End debug*/	
+
+
+----------------------------------------
+--STEP 3: DIAGNOSE THE PATIENT
+----------------------------------------
+
+
+BEGIN TRY
 ----------------------------------------
 --If @TableName is specified, just return information for that table.
 --The @Mode parameter doesn't matter if you're looking at a specific table.
@@ -1573,43 +1957,7 @@ BEGIN
     --We do a left join here in case this is a disabled NC.
     --In that case, it won't have any size info/pages allocated.
  
- ;WITH    [maps]
-          AS ( SELECT   
-                        index_sanity_id,
-						partition_number,
-                        data_compression_desc,
-                        partition_number - ROW_NUMBER() OVER (PARTITION BY ips.index_sanity_id, data_compression_desc ORDER BY partition_number ) AS [rN]
-               FROM     #IndexPartitionSanity ips
-               WHERE    ips.object_id = @ObjectID
-				),
-        [grps]
-          AS ( SELECT   MIN([maps].[partition_number]) AS [MinKey] ,
-                        MAX([maps].[partition_number]) AS [MaxKey] ,
-						index_sanity_id,
-						maps.data_compression_desc
-               FROM     [maps]
-               GROUP BY [maps].[rN], index_sanity_id, maps.data_compression_desc)
-    SELECT DISTINCT grps.index_sanity_id , SUBSTRING((  STUFF((SELECT ', ' + ' Partition'
-                                                + CASE WHEN [grps2].[MinKey] < [grps2].[MaxKey]
-                                                       THEN +'s '
-                                                            + CAST([grps2].[MinKey] AS VARCHAR(100))
-                                                            + ' - '
-                                                            + CAST([grps2].[MaxKey] AS VARCHAR(100))
-                                                            + ' use ' + grps2.data_compression_desc
-                                                       ELSE ' '
-                                                            + CAST([grps2].[MinKey] AS VARCHAR(100))
-                                                            + ' uses '  + grps2.data_compression_desc
-                                                  END AS [Partitions]
-                                         FROM   [grps] AS grps2
-										 WHERE grps2.index_sanity_id = grps.index_sanity_id
-										 ORDER BY grps2.MinKey, grps2.MaxKey
-                                FOR     XML PATH('') ,
-                                            TYPE 
-						).[value]('.', 'VARCHAR(MAX)'), 1, 1, '') ), 0, 8000) AS [partition_compression_detail]
-	INTO #partition_compression_info
-	FROM grps;
-
-    	
+   	
 	   WITH table_mode_cte AS (
         SELECT 
             s.db_schema_object_indexid, 
@@ -1632,6 +1980,10 @@ BEGIN
             s.last_user_update,
             s.create_date,
             s.modify_date,
+			sz.page_latch_wait_count,
+			CONVERT(VARCHAR(10), (sz.page_latch_wait_in_ms / 1000) / 86400) + ':' + CONVERT(VARCHAR(20), DATEADD(s, (sz.page_latch_wait_in_ms / 1000), 0), 108) AS page_latch_wait_time,
+			sz.page_io_latch_wait_count,
+			CONVERT(VARCHAR(10), (sz.page_io_latch_wait_in_ms / 1000) / 86400) + ':' + CONVERT(VARCHAR(20), DATEADD(s, (sz.page_io_latch_wait_in_ms / 1000), 0), 108) AS page_io_latch_wait_time,
             ct.create_tsql,
             1 AS display_order
         FROM #IndexSanity s
@@ -1639,16 +1991,16 @@ BEGIN
             s.index_sanity_id=sz.index_sanity_id
         LEFT JOIN #IndexCreateTsql ct ON 
             s.index_sanity_id=ct.index_sanity_id
-		LEFT JOIN #partition_compression_info pci ON 
+		LEFT JOIN #PartitionCompressionInfo pci ON 
 			pci.index_sanity_id = s.index_sanity_id
         WHERE s.[object_id]=@ObjectID
         UNION ALL
-        SELECT     N'Database ' + QUOTENAME(@DatabaseName) + N' as of ' + CONVERT(NVARCHAR(16),GETDATE(),121) +             
+        SELECT  N'Database ' + QUOTENAME(@DatabaseName) + N' as of ' + CONVERT(NVARCHAR(16),GETDATE(),121) +             
                 N' (' + @ScriptVersionName + ')' ,   
                 N'SQL Server First Responder Kit' ,   
                 N'http://FirstResponderKit.org' ,
                 N'From Your Community Volunteers',
-                NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
+                NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
                 0 AS display_order
     )
     SELECT 
@@ -1669,36 +2021,53 @@ BEGIN
             last_user_update AS [Last User Write],
             create_date AS [Created],
             modify_date AS [Last Modified],
+			page_latch_wait_count AS [Page Latch Wait Count],
+			page_latch_wait_time as [Page Latch Wait Time (D:H:M:S)],
+			page_io_latch_wait_count AS [Page IO Latch Wait Count],								
+			page_io_latch_wait_time as [Page IO Latch Wait Time (D:H:M:S)],
             create_tsql AS [Create TSQL]
     FROM table_mode_cte
     ORDER BY display_order ASC, key_column_names ASC
     OPTION    ( RECOMPILE );                        
 
     IF (SELECT TOP 1 [object_id] FROM    #MissingIndexes mi) IS NOT NULL
-    BEGIN  
+    BEGIN;
+
+	WITH create_date AS (
+						SELECT i.database_id,
+							   i.schema_name,
+							   i.[object_id], 
+							   ISNULL(NULLIF(MAX(DATEDIFF(DAY, i.create_date, SYSDATETIME())), 0), 1) AS create_days
+						FROM #IndexSanity AS i
+						GROUP BY i.database_id, i.schema_name, i.object_id
+						)
         SELECT  N'Missing index.' AS Finding ,
                 N'http://BrentOzar.com/go/Indexaphobia' AS URL ,
                 mi.[statement] + 
                 ' Est. Benefit: '
                     + CASE WHEN magic_benefit_number >= 922337203685477 THEN '>= 922,337,203,685,477'
                     ELSE REPLACE(CONVERT(NVARCHAR(256),CAST(CAST(
-                                        (magic_benefit_number/@DaysUptime)
+                                        (magic_benefit_number / CASE WHEN cd.create_days < @DaysUptime THEN cd.create_days ELSE @DaysUptime END)
                                         AS BIGINT) AS MONEY), 1), '.00', '')
                     END AS [Estimated Benefit],
                 missing_index_details AS [Missing Index Request] ,
                 index_estimated_impact AS [Estimated Impact],
                 create_tsql AS [Create TSQL]
         FROM    #MissingIndexes mi
-        WHERE   [object_id] = @ObjectID
-                /* Minimum benefit threshold = 100k/day of uptime */
-        AND (magic_benefit_number/@DaysUptime) >= 100000
-        ORDER BY magic_benefit_number DESC
+		LEFT JOIN create_date AS cd
+		ON mi.[object_id] =  cd.object_id 
+		AND mi.database_id = cd.database_id
+		AND mi.schema_name = cd.schema_name
+        WHERE   mi.[object_id] = @ObjectID
+                /* Minimum benefit threshold = 100k/day of uptime OR since table creation date, whichever is lower*/
+        AND (magic_benefit_number / CASE WHEN cd.create_days < @DaysUptime THEN cd.create_days ELSE @DaysUptime END) >= 100000
+        ORDER BY is_low, magic_benefit_number DESC
         OPTION    ( RECOMPILE );
-    END       
+    END;       
     ELSE     
     SELECT 'No missing indexes.' AS finding;
 
-    SELECT     
+    SELECT   
         column_name AS [Column Name],
         (SELECT COUNT(*)  
             FROM #IndexColumns c2 
@@ -1713,8 +2082,8 @@ BEGIN
         system_type_name + 
             CASE max_length WHEN -1 THEN N' (max)' ELSE
                 CASE  
-                    WHEN system_type_name IN (N'char',N'nchar',N'binary',N'varbinary') THEN N' (' + CAST(max_length AS NVARCHAR(20)) + N')' 
-                    WHEN system_type_name IN (N'varchar',N'nvarchar') THEN N' (' + CAST(max_length/2 AS NVARCHAR(20)) + N')' 
+                    WHEN system_type_name IN (N'char',N'varchar',N'binary',N'varbinary') THEN N' (' + CAST(max_length AS NVARCHAR(20)) + N')' 
+                    WHEN system_type_name IN (N'nchar',N'nvarchar') THEN N' (' + CAST(max_length/2 AS NVARCHAR(20)) + N')' 
                     ELSE '' 
                 END
             END
@@ -1746,10 +2115,10 @@ BEGIN
         FROM #ForeignKeys
         ORDER BY [Foreign Key]
         OPTION    ( RECOMPILE );
-    END
+    END;
     ELSE
     SELECT 'No foreign keys.' AS finding;
-END 
+END; 
 
 --If @TableName is NOT specified...
 --Act based on the @Mode and @Filter. (@Filter applies only when @Mode=0 "diagnose")
@@ -1764,7 +2133,7 @@ BEGIN;
         ----------------------------------------
         BEGIN;
 
-        --SELECT    [object_id], key_column_names, database_id
+        --SELECT  [object_id], key_column_names, database_id
         --                   FROM        #IndexSanity
         --                   WHERE  index_type IN (1,2) /* Clustered, NC only*/
         --                        AND is_hypothetical = 0
@@ -1775,17 +2144,17 @@ BEGIN;
 
         RAISERROR('check_id 1: Duplicate keys', 0,1) WITH NOWAIT;
             WITH    duplicate_indexes
-                      AS ( SELECT    [object_id], key_column_names, database_id
+                      AS ( SELECT  [object_id], key_column_names, database_id, [schema_name]
                            FROM        #IndexSanity
                            WHERE  index_type IN (1,2) /* Clustered, NC only*/
                                 AND is_hypothetical = 0
                                 AND is_disabled = 0
 								AND is_primary_key = 0
-                           GROUP BY    [object_id], key_column_names, database_id
+                           GROUP BY    [object_id], key_column_names, database_id, [schema_name]
                            HAVING    COUNT(*) > 1)
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    1 AS check_id, 
+                        SELECT  1 AS check_id, 
                                 ip.index_sanity_id,
                                 50 AS Priority,
                                 'Multiple Index Personalities' AS findings_group,
@@ -1800,6 +2169,7 @@ BEGIN;
                         FROM    duplicate_indexes di
                                 JOIN #IndexSanity ip ON di.[object_id] = ip.[object_id]
                                                          AND ip.database_id = di.database_id
+														 AND ip.[schema_name] = di.[schema_name]
                                                          AND di.key_column_names = ip.key_column_names
                                 JOIN #IndexSanitySize ips ON ip.index_sanity_id = ips.index_sanity_id AND ip.database_id = ips.database_id
                         /* WHERE clause limits to only @ThresholdMB or larger duplicate indexes when getting all databases or using PainRelief mode */
@@ -1810,8 +2180,8 @@ BEGIN;
 
         RAISERROR('check_id 2: Keys w/ identical leading columns.', 0,1) WITH NOWAIT;
             WITH    borderline_duplicate_indexes
-                      AS ( SELECT DISTINCT [object_id], first_key_column_name, key_column_names,
-                                    COUNT([object_id]) OVER ( PARTITION BY [object_id], first_key_column_name ) AS number_dupes
+                      AS ( SELECT DISTINCT database_id, [object_id], first_key_column_name, key_column_names,
+                                    COUNT([object_id]) OVER ( PARTITION BY database_id, [object_id], first_key_column_name ) AS number_dupes
                            FROM        #IndexSanity
                            WHERE index_type IN (1,2) /* Clustered, NC only*/
                             AND is_hypothetical=0
@@ -1819,7 +2189,7 @@ BEGIN;
 							AND is_primary_key = 0)
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    2 AS check_id, 
+                        SELECT  2 AS check_id, 
                                 ip.index_sanity_id,
                                 60 AS Priority,
                                 'Multiple Index Personalities' AS findings_group,
@@ -1837,6 +2207,7 @@ BEGIN;
                             SELECT di.[object_id]
                             FROM borderline_duplicate_indexes AS di
                             WHERE di.[object_id] = ip.[object_id] AND
+                                di.database_id = ip.database_id AND
                                 di.first_key_column_name = ip.first_key_column_name AND
                                 di.key_column_names <> ip.key_column_names AND
                                 di.number_dupes > 1    
@@ -1848,24 +2219,57 @@ BEGIN;
                         ORDER BY ip.[schema_name], ip.[object_name], ip.key_column_names, ip.include_column_names
             OPTION    ( RECOMPILE );
 
-        END
+        END;
         ----------------------------------------
         --Aggressive Indexes: Check_id 10-19
         ----------------------------------------
         BEGIN;
 
-        RAISERROR(N'check_id 11: Total lock wait time > 5 minutes (row + page)', 0,1) WITH NOWAIT;
+        RAISERROR(N'check_id 11: Total lock wait time > 5 minutes (row + page) with long average waits', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                SELECT    11 AS check_id, 
+                SELECT  11 AS check_id, 
                         i.index_sanity_id,
                         10 AS Priority,
-                        N'Aggressive Indexes' AS findings_group,
-                        N'Total lock wait time > 5 minutes (row + page)' AS finding, 
+                        N'Aggressive ' 
+                            + CASE COALESCE((SELECT SUM(1) 
+							                 FROM #IndexSanity iMe 
+											 INNER JOIN #IndexSanity iOthers 
+												ON iMe.database_id = iOthers.database_id 
+												AND iMe.object_id = iOthers.object_id 
+												AND iOthers.index_id > 1 
+											 WHERE i.index_sanity_id = iMe.index_sanity_id
+												AND iOthers.is_hypothetical = 0
+												AND iOthers.is_disabled = 0
+											), 0)
+                                WHEN 0 THEN N'Under-Indexing'
+                                WHEN 1 THEN N'Under-Indexing'
+                                WHEN 2 THEN N'Under-Indexing'
+                                WHEN 3 THEN N'Under-Indexing'
+                                WHEN 4 THEN N'Indexes'
+                                WHEN 5 THEN N'Indexes'
+                                WHEN 6 THEN N'Indexes'
+                                WHEN 7 THEN N'Indexes'
+                                WHEN 8 THEN N'Indexes'
+                                WHEN 9 THEN N'Indexes'
+                                ELSE N'Over-Indexing'
+                                END AS findings_group,
+                        N'Total lock wait time > 5 minutes (row + page) with long average waits' AS finding, 
                         [database_name] AS [Database Name],
                         N'http://BrentOzar.com/go/AggressiveIndexes' AS URL,
                         i.db_schema_object_indexid + N': ' +
-                            sz.index_lock_wait_summary AS details, 
+                            sz.index_lock_wait_summary + N' NC indexes on table: ' +
+							 CAST(COALESCE((SELECT SUM(1) 
+							                FROM #IndexSanity iMe 
+											INNER JOIN #IndexSanity iOthers 
+												ON iMe.database_id = iOthers.database_id 
+												AND iMe.object_id = iOthers.object_id 
+												AND iOthers.index_id > 1 
+											WHERE i.index_sanity_id = iMe.index_sanity_id
+											AND iOthers.is_hypothetical = 0
+											AND iOthers.is_disabled = 0
+										   ), 0)
+                                         AS NVARCHAR(30))	 AS details, 
                         i.index_definition,
                         i.secret_columns,
                         i.index_usage_summary,
@@ -1873,8 +2277,69 @@ BEGIN;
                 FROM    #IndexSanity AS i
                 JOIN #IndexSanitySize AS sz ON i.index_sanity_id = sz.index_sanity_id
                 WHERE    (total_row_lock_wait_in_ms + total_page_lock_wait_in_ms) > 300000
+				AND (sz.avg_page_lock_wait_in_ms + sz.avg_row_lock_wait_in_ms) > 5000
+				GROUP BY i.index_sanity_id, [database_name], i.db_schema_object_indexid, sz.index_lock_wait_summary, i.index_definition, i.secret_columns, i.index_usage_summary, sz.index_size_summary, sz.index_sanity_id
+                ORDER BY 4, [database_name], 8
                 OPTION    ( RECOMPILE );
-        END
+
+        RAISERROR(N'check_id 12: Total lock wait time > 5 minutes (row + page) with short average waits', 0,1) WITH NOWAIT;
+                INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
+                                               secret_columns, index_usage_summary, index_size_summary )
+                SELECT  12 AS check_id, 
+                        i.index_sanity_id,
+                        10 AS Priority,
+                        N'Aggressive ' 
+                            + CASE COALESCE((SELECT SUM(1) 
+							                 FROM #IndexSanity iMe 
+											 INNER JOIN #IndexSanity iOthers 
+												ON iMe.database_id = iOthers.database_id 
+												AND iMe.object_id = iOthers.object_id 
+												AND iOthers.index_id > 1 
+											 WHERE i.index_sanity_id = iMe.index_sanity_id
+											 AND iOthers.is_hypothetical = 0
+											 AND iOthers.is_disabled = 0
+											), 0)
+                                WHEN 0 THEN N'Under-Indexing'
+                                WHEN 1 THEN N'Under-Indexing'
+                                WHEN 2 THEN N'Under-Indexing'
+                                WHEN 3 THEN N'Under-Indexing'
+                                WHEN 4 THEN N'Indexes'
+                                WHEN 5 THEN N'Indexes'
+                                WHEN 6 THEN N'Indexes'
+                                WHEN 7 THEN N'Indexes'
+                                WHEN 8 THEN N'Indexes'
+                                WHEN 9 THEN N'Indexes'
+                                ELSE N'Over-Indexing'
+                                END AS findings_group,
+                        N'Total lock wait time > 5 minutes (row + page) with short average waits' AS finding, 
+                        [database_name] AS [Database Name],
+                        N'http://BrentOzar.com/go/AggressiveIndexes' AS URL,
+                        i.db_schema_object_indexid + N': ' +
+                            sz.index_lock_wait_summary + N' NC indexes on table: ' +
+							 CAST(COALESCE((SELECT SUM(1) 
+							                FROM #IndexSanity iMe 
+											INNER JOIN #IndexSanity iOthers 
+												ON iMe.database_id = iOthers.database_id 
+												AND iMe.object_id = iOthers.object_id 
+												AND iOthers.index_id > 1 
+											WHERE i.index_sanity_id = iMe.index_sanity_id
+											AND iOthers.is_hypothetical = 0
+											AND iOthers.is_disabled = 0
+										   ),0)
+                                         AS NVARCHAR(30))	 AS details, 
+                        i.index_definition,
+                        i.secret_columns,
+                        i.index_usage_summary,
+                        sz.index_size_summary
+                FROM    #IndexSanity AS i
+                JOIN #IndexSanitySize AS sz ON i.index_sanity_id = sz.index_sanity_id
+                WHERE    (total_row_lock_wait_in_ms + total_page_lock_wait_in_ms) > 300000
+				AND (sz.avg_page_lock_wait_in_ms + sz.avg_row_lock_wait_in_ms) < 5000
+				GROUP BY i.index_sanity_id, [database_name], i.db_schema_object_indexid, sz.index_lock_wait_summary, i.index_definition, i.secret_columns, i.index_usage_summary, sz.index_size_summary, sz.index_sanity_id
+                ORDER BY 4, [database_name], 8
+                OPTION    ( RECOMPILE );
+
+        END;
 
         ---------------------------------------- 
         --Index Hoarder: Check_id 20-29
@@ -1883,7 +2348,7 @@ BEGIN;
             RAISERROR(N'check_id 20: >=7 NC indexes on any given table. Yes, 7 is an arbitrary number.', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    20 AS check_id, 
+                        SELECT  20 AS check_id, 
                                 MAX(i.index_sanity_id) AS index_sanity_id, 
                                 100 AS Priority,
                                 'Index Hoarder' AS findings_group,
@@ -1908,24 +2373,29 @@ BEGIN;
                         AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
                         GROUP BY db_schema_object_name, [i].[database_name]
                         HAVING    COUNT(*) >= 7
-                        ORDER BY i.db_schema_object_name DESC  OPTION    ( RECOMPILE );
+                        ORDER BY i.db_schema_object_name DESC  
+						OPTION    ( RECOMPILE );
 
             IF @Filter = 1 /*@Filter=1 is "ignore unusued" */
             BEGIN
                 RAISERROR(N'Skipping checks on unused indexes (21 and 22) because @Filter=1', 0,1) WITH NOWAIT;
-            END
+            END;
             ELSE /*Otherwise, go ahead and do the checks*/
             BEGIN
                 RAISERROR(N'check_id 21: >=5 percent of indexes are unused. Yes, 5 is an arbitrary number.', 0,1) WITH NOWAIT;
                     DECLARE @percent_NC_indexes_unused NUMERIC(29,1);
                     DECLARE @NC_indexes_unused_reserved_MB NUMERIC(29,1);
 
-                    SELECT    @percent_NC_indexes_unused =( 100.00 * SUM(CASE    WHEN total_reads = 0 THEN 1
-                                                ELSE 0
-                                           END) ) / COUNT(*) ,
-                            @NC_indexes_unused_reserved_MB = SUM(CASE WHEN total_reads = 0 THEN sz.total_reserved_MB
-                                     ELSE 0
-                                END) 
+                    SELECT  @percent_NC_indexes_unused = ( 100.00 * SUM(CASE 
+					                                                        WHEN total_reads = 0 
+																		    THEN 1
+                                                                            ELSE 0
+                                                                         END) ) / COUNT(*),
+                            @NC_indexes_unused_reserved_MB = SUM(CASE 
+							                                         WHEN total_reads = 0 
+																     THEN sz.total_reserved_MB
+                                                                     ELSE 0
+                                                                 END) 
                     FROM    #IndexSanity i
                     JOIN    #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
                     WHERE    index_id NOT IN ( 0, 1 ) 
@@ -1938,7 +2408,7 @@ BEGIN;
                 IF @percent_NC_indexes_unused >= 5 
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                            SELECT    21 AS check_id, 
+                            SELECT  21 AS check_id, 
                                     MAX(i.index_sanity_id) AS index_sanity_id, 
                                     150 AS Priority,
                                     N'Index Hoarder' AS findings_group,
@@ -1971,14 +2441,14 @@ BEGIN;
                             GROUP BY i.database_name 
                     OPTION    ( RECOMPILE );
 
-                RAISERROR(N'check_id 22: NC indexes with 0 reads. (Borderline)', 0,1) WITH NOWAIT;
+                RAISERROR(N'check_id 22: NC indexes with 0 reads. (Borderline) and >= 10,000 writes', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    22 AS check_id, 
+                        SELECT  22 AS check_id, 
                                 i.index_sanity_id,
-                                150 AS Priority,
+                                100 AS Priority,
                                 N'Index Hoarder' AS findings_group,
-                                N'Unused NC index' AS finding, 
+                                N'Unused NC index with High Writes' AS finding, 
                                 [database_name] AS [Database Name],
                                 N'http://BrentOzar.com/go/IndexHoarder' AS URL,
                                 N'0 reads: ' + i.db_schema_object_indexid AS details, 
@@ -1989,17 +2459,18 @@ BEGIN;
                         FROM    #IndexSanity AS i
                         JOIN    #IndexSanitySize AS sz ON i.index_sanity_id = sz.index_sanity_id
                         WHERE    i.total_reads=0
+						    AND i.user_updates >= 10000
                                 AND i.index_id NOT IN (0,1) /*NCs only*/
                                 AND i.is_unique = 0
                                 AND sz.total_reserved_MB >= CASE WHEN (@GetAllDatabases = 1 OR @Mode = 0) THEN @ThresholdMB ELSE sz.total_reserved_MB END
                         ORDER BY i.db_schema_object_indexid
                         OPTION    ( RECOMPILE );
-            END /*end checks only run when @Filter <> 1*/
+            END; /*end checks only run when @Filter <> 1*/
 
             RAISERROR(N'check_id 23: Indexes with 7 or more columns. (Borderline)', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    23 AS check_id, 
+                    SELECT  23 AS check_id, 
                             i.index_sanity_id,
                             150 AS Priority, 
                             N'Index Hoarder' AS findings_group,
@@ -2019,16 +2490,16 @@ BEGIN;
 
             RAISERROR(N'check_id 24: Wide clustered indexes (> 3 columns or > 16 bytes).', 0,1) WITH NOWAIT;
                 WITH count_columns AS (
-                            SELECT [object_id],
+                            SELECT database_id, [object_id],
                                 SUM(CASE max_length WHEN -1 THEN 0 ELSE max_length END) AS sum_max_length
                             FROM #IndexColumns ic
                             WHERE index_id IN (1,0) /*Heap or clustered only*/
                             AND key_ordinal > 0
-                            GROUP BY object_id
+                            GROUP BY database_id, object_id
                             )
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    24 AS check_id, 
+                        SELECT  24 AS check_id, 
                                 i.index_sanity_id, 
                                 150 AS Priority,
                                 N'Index Hoarder' AS findings_group,
@@ -2039,9 +2510,13 @@ BEGIN;
                                     + CAST(cc.sum_max_length AS NVARCHAR(10))
                                     + N' bytes in clustered index:' + i.db_schema_object_name 
                                     + N'. ' + 
-                                        (SELECT CAST(COUNT(*) AS NVARCHAR(23)) FROM #IndexSanity i2 
-                                        WHERE i2.[object_id]=i.[object_id] AND i2.index_id <> 1
-                                        AND i2.is_disabled=0 AND i2.is_hypothetical=0)
+                                        (SELECT CAST(COUNT(*) AS NVARCHAR(23)) 
+										 FROM #IndexSanity i2 
+                                         WHERE i2.[object_id]=i.[object_id] 
+										 AND i2.database_id = i.database_id 
+										 AND i2.index_id <> 1
+                                         AND i2.is_disabled=0 
+										 AND i2.is_hypothetical=0)
                                         + N' NC indexes on the table.'
                                     AS details,
                                 i.index_definition,
@@ -2050,7 +2525,8 @@ BEGIN;
                                 ip.index_size_summary
                         FROM    #IndexSanity i
                         JOIN    #IndexSanitySize ip ON i.index_sanity_id = ip.index_sanity_id
-                        JOIN    count_columns AS cc ON i.[object_id]=cc.[object_id]    
+                        JOIN    count_columns AS cc ON i.[object_id]=cc.[object_id]
+                                                   AND i.database_id = cc.database_id
                         WHERE    index_id = 1 /* clustered only */
                                 AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
                                 AND 
@@ -2062,15 +2538,19 @@ BEGIN;
             RAISERROR(N'check_id 25: Addicted to nullable columns.', 0,1) WITH NOWAIT;
                 WITH count_columns AS (
                             SELECT [object_id],
+								   [database_id],
+								   [schema_name],
                                 SUM(CASE is_nullable WHEN 1 THEN 0 ELSE 1 END) AS non_nullable_columns,
                                 COUNT(*) AS total_columns
                             FROM #IndexColumns ic
                             WHERE index_id IN (1,0) /*Heap or clustered only*/
-                            GROUP BY object_id
+                            GROUP BY [object_id],
+								     [database_id],
+								     [schema_name]
                             )
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    25 AS check_id, 
+                        SELECT  25 AS check_id, 
                                 i.index_sanity_id, 
                                 200 AS Priority,
                                 N'Index Hoarder' AS findings_group,
@@ -2088,6 +2568,8 @@ BEGIN;
                         FROM    #IndexSanity i
                         JOIN    #IndexSanitySize ip ON i.index_sanity_id = ip.index_sanity_id
                         JOIN    count_columns AS cc ON i.[object_id]=cc.[object_id]
+								AND cc.database_id = ip.database_id
+								AND cc.[schema_name] = ip.[schema_name]
                         WHERE    i.index_id IN (1,0)
                         AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
                             AND cc.non_nullable_columns < 2
@@ -2097,16 +2579,20 @@ BEGIN;
             RAISERROR(N'check_id 26: Wide tables (35+ cols or > 2000 non-LOB bytes).', 0,1) WITH NOWAIT;
                 WITH count_columns AS (
                             SELECT [object_id],
+								   [database_id],
+								   [schema_name],
                                 SUM(CASE max_length WHEN -1 THEN 1 ELSE 0 END) AS count_lob_columns,
                                 SUM(CASE max_length WHEN -1 THEN 0 ELSE max_length END) AS sum_max_length,
                                 COUNT(*) AS total_columns
                             FROM #IndexColumns ic
                             WHERE index_id IN (1,0) /*Heap or clustered only*/
-                            GROUP BY object_id
+                            GROUP BY [object_id],
+								     [database_id],
+								     [schema_name]
                             )
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    26 AS check_id, 
+                        SELECT  26 AS check_id, 
                                 i.index_sanity_id, 
                                 150 AS Priority,
                                 N'Index Hoarder' AS findings_group,
@@ -2128,6 +2614,8 @@ BEGIN;
                         FROM    #IndexSanity i
                         JOIN    #IndexSanitySize ip ON i.index_sanity_id = ip.index_sanity_id
                         JOIN    count_columns AS cc ON i.[object_id]=cc.[object_id]
+								AND cc.database_id = i.database_id
+								AND cc.[schema_name] = i.[schema_name]
                         WHERE    i.index_id IN (1,0)
                         AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
                             AND 
@@ -2138,15 +2626,19 @@ BEGIN;
             RAISERROR(N'check_id 27: Addicted to strings.', 0,1) WITH NOWAIT;
                 WITH count_columns AS (
                             SELECT [object_id],
+								   [database_id],
+								   [schema_name],
                                 SUM(CASE WHEN system_type_name IN ('varchar','nvarchar','char') OR max_length=-1 THEN 1 ELSE 0 END) AS string_or_LOB_columns,
                                 COUNT(*) AS total_columns
                             FROM #IndexColumns ic
                             WHERE index_id IN (1,0) /*Heap or clustered only*/
-                            GROUP BY object_id
+                            GROUP BY [object_id],
+								     [database_id],
+								     [schema_name]
                             )
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    27 AS check_id, 
+                        SELECT  27 AS check_id, 
                                 i.index_sanity_id, 
                                 200 AS Priority,
                                 N'Index Hoarder' AS findings_group,
@@ -2164,6 +2656,8 @@ BEGIN;
                         FROM    #IndexSanity i
                         JOIN    #IndexSanitySize ip ON i.index_sanity_id = ip.index_sanity_id
                         JOIN    count_columns AS cc ON i.[object_id]=cc.[object_id]
+								AND cc.database_id = i.database_id
+								AND cc.[schema_name] = i.[schema_name]
                         CROSS APPLY (SELECT cc.total_columns - string_or_LOB_columns AS non_string_or_lob_columns) AS calc1
                         WHERE    i.index_id IN (1,0)
                         AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
@@ -2174,7 +2668,7 @@ BEGIN;
             RAISERROR(N'check_id 28: Non-unique clustered index.', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    28 AS check_id, 
+                        SELECT  28 AS check_id, 
                                 i.index_sanity_id, 
                                 100 AS Priority,
                                 N'Index Hoarder' AS findings_group,
@@ -2183,9 +2677,13 @@ BEGIN;
                                 N'http://BrentOzar.com/go/IndexHoarder' AS URL,
                                 N'Uniquifiers will be required! Clustered index: ' + i.db_schema_object_name 
                                     + N' and all NC indexes. ' + 
-                                        (SELECT CAST(COUNT(*) AS NVARCHAR(23)) FROM #IndexSanity i2 
-                                        WHERE i2.[object_id]=i.[object_id] AND i2.index_id <> 1
-                                        AND i2.is_disabled=0 AND i2.is_hypothetical=0)
+                                        (SELECT CAST(COUNT(*) AS NVARCHAR(23)) 
+										 FROM #IndexSanity i2 
+                                         WHERE i2.[object_id]=i.[object_id] 
+										 AND i2.database_id = i.database_id 
+										 AND i2.index_id <> 1
+                                         AND i2.is_disabled=0 
+										 AND i2.is_hypothetical=0)
                                         + N' NC indexes on the table.'
                                     AS details,
                                 i.index_definition,
@@ -2198,114 +2696,152 @@ BEGIN;
                         AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
                                 AND is_unique=0 /* not unique */
                                 AND is_CX_columnstore=0 /* not a clustered columnstore-- no unique option on those */
-                        ORDER BY i.db_schema_object_name DESC OPTION    ( RECOMPILE )
+                        ORDER BY i.db_schema_object_name DESC OPTION    ( RECOMPILE );
 
+                RAISERROR(N'check_id 29: NC indexes with 0 reads. (Borderline) and < 10,000 writes', 0,1) WITH NOWAIT;
+                INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
+                                               secret_columns, index_usage_summary, index_size_summary )
+                        SELECT  29 AS check_id, 
+                                i.index_sanity_id,
+                                150 AS Priority,
+                                N'Index Hoarder' AS findings_group,
+                                N'Unused NC index with Low Writes' AS finding, 
+                                [database_name] AS [Database Name],
+                                N'http://BrentOzar.com/go/IndexHoarder' AS URL,
+                                N'0 reads: ' + i.db_schema_object_indexid AS details, 
+                                i.index_definition, 
+                                i.secret_columns, 
+                                i.index_usage_summary,
+                                sz.index_size_summary
+                        FROM    #IndexSanity AS i
+                        JOIN    #IndexSanitySize AS sz ON i.index_sanity_id = sz.index_sanity_id
+                        WHERE    i.total_reads=0
+								AND i.user_updates < 10000
+                                AND i.index_id NOT IN (0,1) /*NCs only*/
+                                AND i.is_unique = 0
+                                AND sz.total_reserved_MB >= CASE WHEN (@GetAllDatabases = 1 OR @Mode = 0) THEN @ThresholdMB ELSE sz.total_reserved_MB END
+								/*Skipping tables created in the last week, or modified in past 2 days*/
+								AND	i.create_date >= DATEADD(dd,-7,GETDATE()) 
+								AND i.modify_date > DATEADD(dd,-2,GETDATE())
+                        ORDER BY i.db_schema_object_indexid
+                        OPTION    ( RECOMPILE );
 
-
-        END
+        END;
          ----------------------------------------
         --Feature-Phobic Indexes: Check_id 30-39
         ---------------------------------------- 
         BEGIN
             RAISERROR(N'check_id 30: No indexes with includes', 0,1) WITH NOWAIT;
+            /* This does not work the way you'd expect with @GetAllDatabases = 1. For details:
+               https://github.com/BrentOzarULTD/SQL-Server-First-Responder-Kit/issues/825
+            */
 
-            DECLARE    @number_indexes_with_includes INT;
-            DECLARE    @percent_indexes_with_includes NUMERIC(10, 1);
+			SELECT  database_name,
+					SUM(CASE WHEN count_included_columns > 0 THEN 1 ELSE 0 END) AS number_indexes_with_includes,
+					100.* SUM(CASE WHEN count_included_columns > 0 THEN 1 ELSE 0 END) / ( 1.0 * COUNT(*) ) AS percent_indexes_with_includes
+			INTO #index_includes
+            FROM    #IndexSanity
+			WHERE is_hypothetical = 0
+			AND is_disabled = 0
+			GROUP BY database_name;
 
-            SELECT    @number_indexes_with_includes = SUM(CASE WHEN count_included_columns > 0 THEN 1 ELSE 0    END),
-                    @percent_indexes_with_includes = 100.* 
-                        SUM(CASE WHEN count_included_columns > 0 THEN 1 ELSE 0 END) / ( 1.0 * COUNT(*) )
-            FROM    #IndexSanity;
-
-            IF @number_indexes_with_includes = 0 AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
-                INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, URL, details, index_definition,
+            IF NOT (@Mode = 0)
+                INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    30 AS check_id, 
+                        SELECT  30 AS check_id, 
                                 NULL AS index_sanity_id, 
                                 250 AS Priority,
                                 N'Feature-Phobic Indexes' AS findings_group,
+								database_name AS [Database Name],
                                 N'No indexes use includes' AS finding, 'http://BrentOzar.com/go/IndexFeatures' AS URL,
                                 N'No indexes use includes' AS details,
-                                @DatabaseName + N' (Entire database)' AS index_definition, 
+                                database_name + N' (Entire database)' AS index_definition, 
                                 N'' AS secret_columns, 
                                 N'N/A' AS index_usage_summary, 
-                                N'N/A' AS index_size_summary OPTION    ( RECOMPILE );
+                                N'N/A' AS index_size_summary 
+						FROM #index_includes
+						WHERE number_indexes_with_includes = 0
+						OPTION    ( RECOMPILE );
 
             RAISERROR(N'check_id 31: < 3 percent of indexes have includes', 0,1) WITH NOWAIT;
-            IF @percent_indexes_with_includes <= 3 AND @number_indexes_with_includes > 0 AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
+            IF NOT (@Mode = 0)
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    31 AS check_id,
-                                NULL AS index_sanity_id, 
-                                150 AS Priority,
-                                N'Feature-Phobic Indexes' AS findings_group,
-                                N'Borderline: Includes are used in < 3% of indexes' AS findings,
-                                @DatabaseName AS [Database Name],
-                                N'http://BrentOzar.com/go/IndexFeatures' AS URL,
-                                N'Only ' + CAST(@percent_indexes_with_includes AS NVARCHAR(10)) + '% of indexes have includes' AS details, 
-                                N'Entire database' AS index_definition, 
-                                N'' AS secret_columns,
-                                N'N/A' AS index_usage_summary, 
-                                N'N/A' AS index_size_summary OPTION    ( RECOMPILE );
+					SELECT  31 AS check_id,
+					        NULL AS index_sanity_id, 
+					        150 AS Priority,
+					        N'Feature-Phobic Indexes' AS findings_group,
+					        N'Borderline: Includes are used in < 3% of indexes' AS findings,
+					        database_name AS [Database Name],
+					        N'http://BrentOzar.com/go/IndexFeatures' AS URL,
+					        N'Only ' + CAST(percent_indexes_with_includes AS NVARCHAR(20)) + '% of indexes have includes' AS details, 
+					        N'Entire database' AS index_definition, 
+					        N'' AS secret_columns,
+					        N'N/A' AS index_usage_summary, 
+					        N'N/A' AS index_size_summary
+					FROM #index_includes
+					WHERE number_indexes_with_includes > 0 AND percent_indexes_with_includes <= 3
+					OPTION    ( RECOMPILE );
 
             RAISERROR(N'check_id 32: filtered indexes and indexed views', 0,1) WITH NOWAIT;
-            DECLARE @count_filtered_indexes INT;
-            DECLARE @count_indexed_views INT;
 
-                SELECT    @count_filtered_indexes=COUNT(*)
-                FROM    #IndexSanity
-                WHERE    filter_definition <> '' OPTION    ( RECOMPILE );
-
-                SELECT    @count_indexed_views=COUNT(*)
-                FROM    #IndexSanity AS i
-                        JOIN #IndexSanitySize AS sz ON i.index_sanity_id = sz.index_sanity_id
-                WHERE    is_indexed_view = 1 OPTION    ( RECOMPILE );
-
-            IF @count_filtered_indexes = 0 AND @count_indexed_views=0 AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
+            IF NOT (@Mode = 0)
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    32 AS check_id, 
-                                NULL AS index_sanity_id,
-                                250 AS Priority,
-                                N'Feature-Phobic Indexes' AS findings_group,
-                                N'Borderline: No filtered indexes or indexed views exist' AS finding, 
-                                @DatabaseName AS [Database Name],
-                                N'http://BrentOzar.com/go/IndexFeatures' AS URL,
-                                N'These are NOT always needed-- but do you know when you would use them?' AS details,
-                                @DatabaseName + N' (Entire database)' AS index_definition, 
-                                N'' AS secret_columns,
-                                N'N/A' AS index_usage_summary, 
-                                N'N/A' AS index_size_summary OPTION    ( RECOMPILE );
+					SELECT  DISTINCT
+							32 AS check_id, 
+					        NULL AS index_sanity_id,
+					        250 AS Priority,
+					        N'Feature-Phobic Indexes' AS findings_group,
+					        N'Borderline: No filtered indexes or indexed views exist' AS finding, 
+					        i.database_name AS [Database Name],
+					        N'http://BrentOzar.com/go/IndexFeatures' AS URL,
+					        N'These are NOT always needed-- but do you know when you would use them?' AS details,
+					        i.database_name + N' (Entire database)' AS index_definition, 
+					        N'' AS secret_columns,
+					        N'N/A' AS index_usage_summary, 
+					        N'N/A' AS index_size_summary 
+					FROM #IndexSanity i
+					WHERE i.database_name NOT IN (                
+							SELECT   database_name
+							FROM     #IndexSanity
+							WHERE    filter_definition <> '' )
+					AND i.database_name NOT IN (
+					       SELECT  database_name
+						   FROM    #IndexSanity
+						   WHERE   is_indexed_view = 1 )
+					OPTION    ( RECOMPILE );
         END;
 
         RAISERROR(N'check_id 33: Potential filtered indexes based on column names.', 0,1) WITH NOWAIT;
 
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-        SELECT    33 AS check_id, 
-                i.index_sanity_id AS index_sanity_id,
-                250 AS Priority,
-                N'Feature-Phobic Indexes' AS findings_group,
-                N'Potential filtered index (based on column name)' AS finding, 
-                [database_name] AS [Database Name],
-                N'http://BrentOzar.com/go/IndexFeatures' AS URL,
-                N'A column name in this index suggests it might be a candidate for filtering (is%, %archive%, %active%, %flag%)' AS details,
-                i.index_definition, 
-                i.secret_columns,
-                i.index_usage_summary, 
-                sz.index_size_summary
-        FROM #IndexColumns ic 
-        JOIN #IndexSanity i ON 
-            ic.[object_id]=i.[object_id] AND
-            ic.[index_id]=i.[index_id] AND
-            i.[index_id] > 1 /* non-clustered index */
-        JOIN    #IndexSanitySize AS sz ON i.index_sanity_id = sz.index_sanity_id
-        WHERE (column_name LIKE 'is%'
-            OR column_name LIKE '%archive%'
-            OR column_name LIKE '%active%'
-            OR column_name LIKE '%flag%')
-            AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
-        OPTION    ( RECOMPILE );
+					SELECT  33 AS check_id, 
+					        i.index_sanity_id AS index_sanity_id,
+					        250 AS Priority,
+					        N'Feature-Phobic Indexes' AS findings_group,
+					        N'Potential filtered index (based on column name)' AS finding, 
+					        [database_name] AS [Database Name],
+					        N'http://BrentOzar.com/go/IndexFeatures' AS URL,
+					        N'A column name in this index suggests it might be a candidate for filtering (is%, %archive%, %active%, %flag%)' AS details,
+					        i.index_definition, 
+					        i.secret_columns,
+					        i.index_usage_summary, 
+					        sz.index_size_summary
+					FROM #IndexColumns ic 
+					JOIN #IndexSanity i ON ic.[object_id]=i.[object_id] 
+						AND ic.database_id =i.database_id
+						AND ic.schema_name = i.schema_name
+						AND ic.[index_id]=i.[index_id] 
+						AND i.[index_id] > 1 /* non-clustered index */
+					JOIN    #IndexSanitySize AS sz ON i.index_sanity_id = sz.index_sanity_id
+					WHERE (column_name LIKE 'is%'
+					    OR column_name LIKE '%archive%'
+					    OR column_name LIKE '%active%'
+					    OR column_name LIKE '%flag%')
+					    AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
+					OPTION    ( RECOMPILE );
         
          ----------------------------------------
         --Self Loathing Indexes : Check_id 40-49
@@ -2315,7 +2851,7 @@ BEGIN;
             RAISERROR(N'check_id 40: Fillfactor in nonclustered 80 percent or less', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    40 AS check_id, 
+                    SELECT  40 AS check_id, 
                             i.index_sanity_id,
                             100 AS Priority,
                             N'Self Loathing Indexes' AS findings_group,
@@ -2343,7 +2879,7 @@ BEGIN;
             RAISERROR(N'check_id 40: Fillfactor in clustered 80 percent or less', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    40 AS check_id, 
+                    SELECT  40 AS check_id, 
                             i.index_sanity_id,
                             100 AS Priority,
                             N'Self Loathing Indexes' AS findings_group,
@@ -2372,7 +2908,7 @@ BEGIN;
             RAISERROR(N'check_id 41: Hypothetical indexes ', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    41 AS check_id, 
+                    SELECT  41 AS check_id, 
                             i.index_sanity_id,
                             150 AS Priority,
                             N'Self Loathing Indexes' AS findings_group,
@@ -2394,7 +2930,7 @@ BEGIN;
             --Note: disabled NC indexes will have O rows in #IndexSanitySize!
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    42 AS check_id, 
+                    SELECT  42 AS check_id, 
                             index_sanity_id,
                             150 AS Priority,
                             N'Self Loathing Indexes' AS findings_group,
@@ -2411,53 +2947,104 @@ BEGIN;
                     AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
                     OPTION    ( RECOMPILE );
 
-            RAISERROR(N'check_id 43: Heaps with forwarded records or deletes', 0,1) WITH NOWAIT;
+            RAISERROR(N'check_id 43: Heaps with forwarded records', 0,1) WITH NOWAIT;
             WITH    heaps_cte
-                      AS ( SELECT    [object_id], 
+                      AS ( SELECT   [object_id],
+								    [database_id],
+								    [schema_name],
                                     SUM(forwarded_fetch_count) AS forwarded_fetch_count,
                                     SUM(leaf_delete_count) AS leaf_delete_count
                            FROM        #IndexPartitionSanity
-                           GROUP BY    [object_id]
-                           HAVING    SUM(forwarded_fetch_count) > 0
-                                    OR SUM(leaf_delete_count) > 0)
+                           GROUP BY    [object_id],
+								       [database_id],
+								       [schema_name]
+                           HAVING    SUM(forwarded_fetch_count) > 0)
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    43 AS check_id, 
+                        SELECT  43 AS check_id, 
                                 i.index_sanity_id,
                                 100 AS Priority,
                                 N'Self Loathing Indexes' AS findings_group,
-                                N'Heaps with forwarded records or deletes' AS finding, 
+                                N'Heaps with forwarded records' AS finding, 
                                 [database_name] AS [Database Name],
                                 N'http://BrentOzar.com/go/SelfLoathing' AS URL,
-                                CAST(h.forwarded_fetch_count AS NVARCHAR(256)) + ' forwarded fetches, '
-                                + CAST(h.leaf_delete_count AS NVARCHAR(256)) + ' deletes against heap:'
+                                CASE WHEN h.forwarded_fetch_count >= 922337203685477 THEN '>= 922,337,203,685,477'
+                                    WHEN @DaysUptime < 1 THEN CAST(h.forwarded_fetch_count AS NVARCHAR(256)) + N' forwarded fetches against heap: ' + db_schema_object_indexid
+                                    ELSE REPLACE(CONVERT(NVARCHAR(256),CAST(CAST(
+                                    (h.forwarded_fetch_count /*/@DaysUptime */)
+                                     AS BIGINT) AS MONEY), 1), '.00', '') 
+                                    END + N' forwarded fetches per day against heap: '
                                 + db_schema_object_indexid AS details, 
                                 i.index_definition, 
                                 i.secret_columns,
                                 i.index_usage_summary,
                                 sz.index_size_summary
                         FROM    #IndexSanity i
-                        JOIN heaps_cte h ON i.[object_id] = h.[object_id]
+                        JOIN heaps_cte h ON i.[object_id] = h.[object_id] 
+							 AND i.[database_id] = h.[database_id]
+							 AND i.[schema_name] = h.[schema_name]
+                        JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
+                        WHERE    i.index_id = 0 
+                        AND h.forwarded_fetch_count / @DaysUptime > 1000
+                        AND sz.total_reserved_MB >= CASE WHEN NOT (@GetAllDatabases = 1 OR @Mode = 4) THEN @ThresholdMB ELSE sz.total_reserved_MB END
+                OPTION    ( RECOMPILE );
+
+            RAISERROR(N'check_id 49: Heaps with deletes', 0,1) WITH NOWAIT;
+            WITH    heaps_cte
+                      AS ( SELECT   [object_id],
+								    [database_id],
+								    [schema_name],
+                                    SUM(leaf_delete_count) AS leaf_delete_count
+                           FROM        #IndexPartitionSanity
+                           GROUP BY    [object_id],
+								       [database_id],
+								       [schema_name]
+                           HAVING    SUM(forwarded_fetch_count) < 1000 * @DaysUptime /* Only alert about indexes with no forwarded fetches - we already alerted about those in check_id 43 */
+                                    AND SUM(leaf_delete_count) > 0)
+                INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
+                                               secret_columns, index_usage_summary, index_size_summary )
+                        SELECT  73 AS check_id, 
+                                i.index_sanity_id,
+                                200 AS Priority,
+                                N'Self Loathing Indexes' AS findings_group,
+                                N'Heaps with deletes' AS finding, 
+                                [database_name] AS [Database Name],
+                                N'http://BrentOzar.com/go/SelfLoathing' AS URL,
+                                CAST(h.leaf_delete_count AS NVARCHAR(256)) + N' deletes against heap:'
+                                + db_schema_object_indexid AS details, 
+                                i.index_definition, 
+                                i.secret_columns,
+                                i.index_usage_summary,
+                                sz.index_size_summary
+                        FROM    #IndexSanity i
+                        JOIN heaps_cte h ON i.[object_id] = h.[object_id] 
+							 AND i.[database_id] = h.[database_id]
+							 AND i.[schema_name] = h.[schema_name]
                         JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
                         WHERE    i.index_id = 0 
                         AND sz.total_reserved_MB >= CASE WHEN NOT (@GetAllDatabases = 1 OR @Mode = 4) THEN @ThresholdMB ELSE sz.total_reserved_MB END
                 OPTION    ( RECOMPILE );
 
-            RAISERROR(N'check_id 44: Heaps with reads or writes.', 0,1) WITH NOWAIT;
+            RAISERROR(N'check_id 44: Large Heaps with reads or writes.', 0,1) WITH NOWAIT;
             WITH    heaps_cte
-                      AS ( SELECT    [object_id], SUM(forwarded_fetch_count) AS forwarded_fetch_count,
+                      AS ( SELECT   [object_id],
+								    [database_id],
+								    [schema_name], 
+									SUM(forwarded_fetch_count) AS forwarded_fetch_count,
                                     SUM(leaf_delete_count) AS leaf_delete_count
                            FROM        #IndexPartitionSanity
-                           GROUP BY    [object_id]
+                           GROUP BY  [object_id],
+								     [database_id],
+								     [schema_name]
                            HAVING    SUM(forwarded_fetch_count) > 0
                                     OR SUM(leaf_delete_count) > 0)
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    44 AS check_id, 
+                        SELECT  44 AS check_id, 
                                 i.index_sanity_id,
                                 100 AS Priority,
                                 N'Self Loathing Indexes' AS findings_group,
-                                N'Active heap' AS finding, 
+                                N'Large Active heap' AS finding, 
                                 [database_name] AS [Database Name],
                                 N'http://BrentOzar.com/go/SelfLoathing' AS URL,
                                 N'Should this table be a heap? ' + db_schema_object_indexid AS details, 
@@ -2466,19 +3053,101 @@ BEGIN;
                                 i.index_usage_summary,
                                 sz.index_size_summary
                         FROM    #IndexSanity i
-                        LEFT JOIN heaps_cte h ON i.[object_id] = h.[object_id]
+                        LEFT JOIN heaps_cte h ON i.[object_id] = h.[object_id] 
+								AND i.[database_id] = h.[database_id]
+								AND i.[schema_name] = h.[schema_name]
                         JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
                         WHERE    i.index_id = 0 
-                                AND 
-                                    (i.total_reads > 0 OR i.user_updates > 0)
+                                AND (i.total_reads > 0 OR i.user_updates > 0)
+								AND sz.total_rows >= 100000
                                 AND h.[object_id] IS NULL /*don't duplicate the prior check.*/
                                 AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
                 OPTION    ( RECOMPILE );
 
-				            RAISERROR(N'check_id 45: Heap with a Nonclustered Primary Key', 0,1) WITH NOWAIT;
+            RAISERROR(N'check_id 45: Medium Heaps with reads or writes.', 0,1) WITH NOWAIT;
+            WITH    heaps_cte
+                      AS ( SELECT   [object_id],
+								    [database_id],
+								    [schema_name], 
+									SUM(forwarded_fetch_count) AS forwarded_fetch_count,
+                                    SUM(leaf_delete_count) AS leaf_delete_count
+                           FROM        #IndexPartitionSanity
+                           GROUP BY  [object_id],
+								     [database_id],
+								     [schema_name]
+                           HAVING    SUM(forwarded_fetch_count) > 0
+                                    OR SUM(leaf_delete_count) > 0)
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
                         SELECT  45 AS check_id, 
+                                i.index_sanity_id,
+                                100 AS Priority,
+                                N'Self Loathing Indexes' AS findings_group,
+                                N'Medium Active heap' AS finding, 
+                                [database_name] AS [Database Name],
+                                N'http://BrentOzar.com/go/SelfLoathing' AS URL,
+                                N'Should this table be a heap? ' + db_schema_object_indexid AS details, 
+                                i.index_definition, 
+                                'N/A' AS secret_columns,
+                                i.index_usage_summary,
+                                sz.index_size_summary
+                        FROM    #IndexSanity i
+                        LEFT JOIN heaps_cte h ON i.[object_id] = h.[object_id] 
+								AND i.[database_id] = h.[database_id]
+								AND i.[schema_name] = h.[schema_name]
+                        JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
+                        WHERE    i.index_id = 0 
+                                AND 
+                                    (i.total_reads > 0 OR i.user_updates > 0)
+								AND sz.total_rows >= 10000 AND sz.total_rows < 100000
+                                AND h.[object_id] IS NULL /*don't duplicate the prior check.*/
+                                AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
+                OPTION    ( RECOMPILE );
+
+            RAISERROR(N'check_id 46: Small Heaps with reads or writes.', 0,1) WITH NOWAIT;
+            WITH    heaps_cte
+                      AS ( SELECT   [object_id],
+								    [database_id],
+								    [schema_name], 
+									SUM(forwarded_fetch_count) AS forwarded_fetch_count,
+                                    SUM(leaf_delete_count) AS leaf_delete_count
+                           FROM        #IndexPartitionSanity
+                           GROUP BY  [object_id],
+								     [database_id],
+								     [schema_name]
+                           HAVING    SUM(forwarded_fetch_count) > 0
+                                    OR SUM(leaf_delete_count) > 0)
+                INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
+                                               secret_columns, index_usage_summary, index_size_summary )
+                        SELECT  46 AS check_id, 
+                                i.index_sanity_id,
+                                100 AS Priority,
+                                N'Self Loathing Indexes' AS findings_group,
+                                N'Small Active heap' AS finding, 
+                                [database_name] AS [Database Name],
+                                N'http://BrentOzar.com/go/SelfLoathing' AS URL,
+                                N'Should this table be a heap? ' + db_schema_object_indexid AS details, 
+                                i.index_definition, 
+                                'N/A' AS secret_columns,
+                                i.index_usage_summary,
+                                sz.index_size_summary
+                        FROM    #IndexSanity i
+                        LEFT JOIN heaps_cte h ON i.[object_id] = h.[object_id] 
+								AND i.[database_id] = h.[database_id]
+								AND i.[schema_name] = h.[schema_name]
+                        JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
+                        WHERE    i.index_id = 0 
+                                AND 
+                                    (i.total_reads > 0 OR i.user_updates > 0)
+								AND sz.total_rows < 10000
+                                AND h.[object_id] IS NULL /*don't duplicate the prior check.*/
+                                AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
+						OPTION    ( RECOMPILE );
+
+				            RAISERROR(N'check_id 47: Heap with a Nonclustered Primary Key', 0,1) WITH NOWAIT;
+                INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
+                                               secret_columns, index_usage_summary, index_size_summary )
+                        SELECT  47 AS check_id, 
                                 i.index_sanity_id,
                                 100 AS Priority,
                                 N'Self Loathing Indexes' AS findings_group,
@@ -2493,7 +3162,39 @@ BEGIN;
                         FROM    #IndexSanity i
                         JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
                         WHERE    i.index_type = 2 AND i.is_primary_key = 1 AND i.secret_columns LIKE '%RID%'
-                OPTION    ( RECOMPILE );
+						OPTION    ( RECOMPILE );
+
+				            RAISERROR(N'check_id 48: Nonclustered indexes with a bad read to write ration', 0,1) WITH NOWAIT;
+                INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
+                                               secret_columns, index_usage_summary, index_size_summary )
+                        SELECT  48 AS check_id, 
+                                i.index_sanity_id,
+                                100 AS Priority,
+                                N'Index Hoarder' AS findings_group,
+                                N'NC index with High Writes:Reads' AS finding, 
+                                [database_name] AS [Database Name],
+                                N'http://BrentOzar.com/go/IndexHoarder' AS URL,
+                                N'Reads: '
+								+ CONVERT(NVARCHAR(10), i.total_reads)
+								+ N' Writes: ' 
+								+ CONVERT(NVARCHAR(10), i.user_updates)
+								+ N' on: '
+								+ i.db_schema_object_indexid AS details, 
+                                i.index_definition, 
+                                i.secret_columns, 
+                                i.index_usage_summary,
+                                sz.index_size_summary
+                        FROM    #IndexSanity i
+                        JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
+                        WHERE    i.total_reads > 0 /*Not totally unused*/
+								AND i.user_updates >= 10000 /*Decent write activity*/
+								AND ((i.total_reads * 10) < i.user_updates) /*10x more writes than reads*/
+                                AND i.index_id NOT IN (0,1) /*NCs only*/
+                                AND i.is_unique = 0 
+                                AND sz.total_reserved_MB >= CASE WHEN (@GetAllDatabases = 1 OR @Mode = 0) THEN @ThresholdMB ELSE sz.total_reserved_MB END
+                        ORDER BY i.db_schema_object_indexid
+                        OPTION    ( RECOMPILE );
+
 
             END;
         ----------------------------------------
@@ -2504,13 +3205,16 @@ BEGIN;
             RAISERROR(N'check_id 50: Indexaphobia.', 0,1) WITH NOWAIT;
             WITH    index_size_cte
                       AS ( SELECT   i.database_id,
+									i.schema_name,
 									i.[object_id], 
                                     MAX(i.index_sanity_id) AS index_sanity_id,
+									ISNULL(NULLIF(MAX(DATEDIFF(DAY, i.create_date, SYSDATETIME())), 0), 1) AS create_days,
                                 ISNULL (
                                     CAST(SUM(CASE WHEN index_id NOT IN (0,1) THEN 1 ELSE 0 END)
                                          AS NVARCHAR(30))+ N' NC indexes exist (' + 
                                     CASE WHEN SUM(CASE WHEN index_id NOT IN (0,1) THEN sz.total_reserved_MB ELSE 0 END) > 1024
                                         THEN CAST(CAST(SUM(CASE WHEN index_id NOT IN (0,1) THEN sz.total_reserved_MB ELSE 0 END )/1024. 
+
                                             AS NUMERIC(29,1)) AS NVARCHAR(30)) + N'GB); ' 
                                         ELSE CAST(SUM(CASE WHEN index_id NOT IN (0,1) THEN sz.total_reserved_MB ELSE 0 END) 
                                             AS NVARCHAR(30)) + N'MB); '
@@ -2522,7 +3226,9 @@ BEGIN;
                                 ,N'') AS index_size_summary
                             FROM    #IndexSanity AS i
                             LEFT    JOIN #IndexSanitySize AS sz ON i.index_sanity_id = sz.index_sanity_id  AND i.database_id = sz.database_id
-                           GROUP BY    i.database_id, i.[object_id])
+							WHERE i.is_hypothetical = 0
+                                  AND i.is_disabled = 0
+                           GROUP BY    i.database_id, i.schema_name, i.[object_id])
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                index_usage_summary, index_size_summary, create_tsql, more_info )
                         
@@ -2530,12 +3236,16 @@ BEGIN;
                                 index_estimated_impact, t.index_size_summary, create_tsql, more_info
                         FROM
                         (
-                            SELECT  ROW_NUMBER() OVER (ORDER BY magic_benefit_number DESC) AS rownum,
+                            SELECT  ROW_NUMBER() OVER (ORDER BY mi.is_low, magic_benefit_number DESC) AS rownum,
                                 50 AS check_id, 
                                 sz.index_sanity_id,
                                 10 AS Priority,
                                 N'Indexaphobia' AS findings_group,
-                                N'High value missing index' AS finding, 
+                                N'High value missing index' + CASE mi.is_low 
+															  WHEN 0 THEN N' with High Impact' 
+															  WHEN 1 THEN N' with Low Impact'
+															  END
+															  AS finding, 
                                 [database_name] AS [Database Name],
                                 N'http://BrentOzar.com/go/Indexaphobia' AS URL,
                                 mi.[statement] + 
@@ -2550,17 +3260,22 @@ BEGIN;
                                 sz.index_size_summary,
                                 mi.create_tsql,
                                 mi.more_info,
-                                magic_benefit_number
+                                magic_benefit_number,
+								mi.is_low
                         FROM    #MissingIndexes mi
-                                LEFT JOIN index_size_cte sz ON mi.[object_id] = sz.object_id AND DB_ID(mi.database_name) = sz.database_id
-                                        /* Minimum benefit threshold = 100k/day of uptime */
-                        WHERE ( @Mode = 4 AND (magic_benefit_number/@DaysUptime) >= 100000 ) OR (magic_benefit_number/@DaysUptime) >= 100000
+                                LEFT JOIN index_size_cte sz ON mi.[object_id] = sz.object_id 
+										  AND mi.database_id = sz.database_id
+										  AND mi.schema_name = sz.schema_name
+                                        /* Minimum benefit threshold = 100k/day of uptime OR since table creation date, whichever is lower*/
+                        WHERE ( @Mode = 4 AND (magic_benefit_number / CASE WHEN sz.create_days < @DaysUptime THEN sz.create_days ELSE @DaysUptime END) >= 100000 ) 
+						OR (magic_benefit_number / CASE WHEN sz.create_days < @DaysUptime THEN sz.create_days ELSE @DaysUptime END) >= 100000
                         ) AS t
                         WHERE t.rownum <= CASE WHEN (@Mode <> 4) THEN 20 ELSE t.rownum END
-                        ORDER BY magic_benefit_number DESC
+                        ORDER BY t.is_low, magic_benefit_number DESC
+						OPTION    ( RECOMPILE );
 
 
-    END
+    END;
          ----------------------------------------
         --Abnormal Psychology : Check_id 60-79
         ----------------------------------------
@@ -2568,7 +3283,7 @@ BEGIN;
             RAISERROR(N'check_id 60: XML indexes', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    60 AS check_id, 
+                    SELECT  60 AS check_id, 
                             i.index_sanity_id,
                             150 AS Priority,
                             N'Abnormal Psychology' AS findings_group,
@@ -2582,12 +3297,13 @@ BEGIN;
                             ISNULL(sz.index_size_summary,'') AS index_size_summary
                     FROM    #IndexSanity AS i
                     JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
-                    WHERE i.is_XML = 1 OPTION    ( RECOMPILE );
+                    WHERE i.is_XML = 1 
+					OPTION    ( RECOMPILE );
 
             RAISERROR(N'check_id 61: Columnstore indexes', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    61 AS check_id, 
+                    SELECT  61 AS check_id, 
                             i.index_sanity_id,
                             150 AS Priority,
                             N'Abnormal Psychology' AS findings_group,
@@ -2611,7 +3327,7 @@ BEGIN;
             RAISERROR(N'check_id 62: Spatial indexes', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    62 AS check_id, 
+                    SELECT  62 AS check_id, 
                             i.index_sanity_id,
                             150 AS Priority,
                             N'Abnormal Psychology' AS findings_group,
@@ -2625,12 +3341,13 @@ BEGIN;
                             ISNULL(sz.index_size_summary,'') AS index_size_summary
                     FROM    #IndexSanity AS i
                     JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
-                    WHERE i.is_spatial = 1 OPTION    ( RECOMPILE );
+                    WHERE i.is_spatial = 1 
+					OPTION    ( RECOMPILE );
 
             RAISERROR(N'check_id 63: Compressed indexes', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    63 AS check_id, 
+                    SELECT  63 AS check_id, 
                             i.index_sanity_id,
                             150 AS Priority,
                             N'Abnormal Psychology' AS findings_group,
@@ -2644,12 +3361,13 @@ BEGIN;
                             ISNULL(sz.index_size_summary,'') AS index_size_summary
                     FROM    #IndexSanity AS i
                     JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
-                    WHERE sz.data_compression_desc LIKE '%PAGE%' OR sz.data_compression_desc LIKE '%ROW%' OPTION    ( RECOMPILE );
+                    WHERE sz.data_compression_desc LIKE '%PAGE%' OR sz.data_compression_desc LIKE '%ROW%' 
+					OPTION    ( RECOMPILE );
 
             RAISERROR(N'check_id 64: Partitioned', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    64 AS check_id, 
+                    SELECT  64 AS check_id, 
                             i.index_sanity_id,
                             150 AS Priority,
                             N'Abnormal Psychology' AS findings_group,
@@ -2663,12 +3381,13 @@ BEGIN;
                             ISNULL(sz.index_size_summary,'') AS index_size_summary
                     FROM    #IndexSanity AS i
                     JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
-                    WHERE i.partition_key_column_name IS NOT NULL OPTION    ( RECOMPILE );
+                    WHERE i.partition_key_column_name IS NOT NULL 
+					OPTION    ( RECOMPILE );
 
             RAISERROR(N'check_id 65: Non-Aligned Partitioned', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    65 AS check_id, 
+                    SELECT  65 AS check_id, 
                             i.index_sanity_id,
                             150 AS Priority,
                             N'Abnormal Psychology' AS findings_group,
@@ -2683,16 +3402,18 @@ BEGIN;
                     FROM    #IndexSanity AS i
                     JOIN #IndexSanity AS iParent ON
                         i.[object_id]=iParent.[object_id]
+						AND i.database_id = iParent.database_id
+						AND i.schema_name = iParent.schema_name
                         AND iParent.index_id IN (0,1) /* could be a partitioned heap or clustered table */
                         AND iParent.partition_key_column_name IS NOT NULL /* parent is partitioned*/         
                     JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
                     WHERE i.partition_key_column_name IS NULL 
-                        OPTION    ( RECOMPILE );
+                    OPTION    ( RECOMPILE );
 
             RAISERROR(N'check_id 66: Recently created tables/indexes (1 week)', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    66 AS check_id, 
+                    SELECT  66 AS check_id, 
                             i.index_sanity_id,
                             200 AS Priority,
                             N'Abnormal Psychology' AS findings_group,
@@ -2711,12 +3432,12 @@ BEGIN;
                     JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
                     WHERE i.create_date >= DATEADD(dd,-7,GETDATE()) 
                     AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
-                        OPTION    ( RECOMPILE );
+                    OPTION    ( RECOMPILE );
 
             RAISERROR(N'check_id 67: Recently modified tables/indexes (2 days)', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                    SELECT    67 AS check_id, 
+                    SELECT  67 AS check_id, 
                             i.index_sanity_id,
                             200 AS Priority,
                             N'Abnormal Psychology' AS findings_group,
@@ -2737,7 +3458,7 @@ BEGIN;
                     AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
                     AND /*Exclude recently created tables.*/
                     i.create_date < DATEADD(dd,-7,GETDATE()) 
-                        OPTION    ( RECOMPILE );
+                    OPTION    ( RECOMPILE );
 
             RAISERROR(N'check_id 68: Identity columns within 30 percent of the end of range', 0,1) WITH NOWAIT;
             -- Allowed Ranges: 
@@ -2747,7 +3468,7 @@ BEGIN;
 
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    68 AS check_id, 
+                        SELECT  68 AS check_id, 
                                 i.index_sanity_id, 
                                 200 AS Priority,
                                 N'Abnormal Psychology' AS findings_group,
@@ -2776,6 +3497,8 @@ BEGIN;
                         FROM    #IndexSanity i
                         JOIN    #IndexColumns ic ON
                             i.object_id=ic.object_id
+							AND i.database_id = ic.database_id
+							AND i.schema_name = ic.schema_name
                             AND i.index_id IN (0,1) /* heaps and cx only */
                             AND ic.is_identity=1
                             AND ic.system_type_name IN ('tinyint', 'smallint', 'int')
@@ -2801,7 +3524,7 @@ BEGIN;
                         WHERE    i.index_id IN (1,0)
                             AND calc1.percent_remaining <= 30
                         UNION ALL
-                        SELECT    68 AS check_id, 
+                        SELECT  68 AS check_id, 
                                 i.index_sanity_id, 
                                 200 AS Priority,
                                 N'Abnormal Psychology' AS findings_group,
@@ -2828,26 +3551,33 @@ BEGIN;
                         FROM    #IndexSanity i
                         JOIN    #IndexColumns ic ON
                             i.object_id=ic.object_id
+							AND i.database_id = ic.database_id
+							AND i.schema_name = ic.schema_name
                             AND i.index_id IN (0,1) /* heaps and cx only */
                             AND ic.is_identity=1
                             AND ic.system_type_name IN ('tinyint', 'smallint', 'int')
                         JOIN    #IndexSanitySize ip ON i.index_sanity_id = ip.index_sanity_id
                         WHERE    i.index_id IN (1,0)
                             AND (ic.seed_value < 0 OR ic.increment_value <> 1)
-                        ORDER BY finding, details DESC OPTION    ( RECOMPILE );
+                        ORDER BY finding, details DESC 
+						OPTION    ( RECOMPILE );
 
             RAISERROR(N'check_id 69: Column collation does not match database collation', 0,1) WITH NOWAIT;
                 WITH count_columns AS (
                             SELECT [object_id],
-                                COUNT(*) AS column_count
+								   database_id,
+								   schema_name,
+                                   COUNT(*) AS column_count
                             FROM #IndexColumns ic
                             WHERE index_id IN (1,0) /*Heap or clustered only*/
-                                AND collation_name <> @collation
-                            GROUP BY object_id
+                            AND collation_name <> @collation
+                            GROUP BY [object_id],
+								     database_id,
+								     schema_name
                             )
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    69 AS check_id, 
+                        SELECT  69 AS check_id, 
                                 i.index_sanity_id, 
                                 150 AS Priority,
                                 N'Abnormal Psychology' AS findings_group,
@@ -2866,6 +3596,8 @@ BEGIN;
                         FROM    #IndexSanity i
                         JOIN    #IndexSanitySize ip ON i.index_sanity_id = ip.index_sanity_id
                         JOIN    count_columns AS cc ON i.[object_id]=cc.[object_id]
+								AND cc.database_id = i.database_id
+								AND cc.schema_name = i.schema_name
                         WHERE    i.index_id IN (1,0)
                         AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
                         ORDER BY i.db_schema_object_name DESC OPTION    ( RECOMPILE );
@@ -2873,15 +3605,19 @@ BEGIN;
             RAISERROR(N'check_id 70: Replicated columns', 0,1) WITH NOWAIT;
                 WITH count_columns AS (
                             SELECT [object_id],
-                                COUNT(*) AS column_count,
-                                SUM(CASE is_replicated WHEN 1 THEN 1 ELSE 0 END) AS replicated_column_count
+								   database_id,
+								   schema_name,
+                                   COUNT(*) AS column_count,
+                                   SUM(CASE is_replicated WHEN 1 THEN 1 ELSE 0 END) AS replicated_column_count
                             FROM #IndexColumns ic
                             WHERE index_id IN (1,0) /*Heap or clustered only*/
-                            GROUP BY object_id
+                            GROUP BY object_id,
+								     database_id,
+								     schema_name
                             )
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary )
-                        SELECT    70 AS check_id, 
+                        SELECT  70 AS check_id, 
                                 i.index_sanity_id,
                                 200 AS Priority, 
                                 N'Abnormal Psychology' AS findings_group,
@@ -2901,15 +3637,18 @@ BEGIN;
                         FROM    #IndexSanity i
                         JOIN    #IndexSanitySize ip ON i.index_sanity_id = ip.index_sanity_id
                         JOIN    count_columns AS cc ON i.[object_id]=cc.[object_id]
+								AND i.database_id = cc.database_id
+								AND i.schema_name = cc.schema_name
                         WHERE    i.index_id IN (1,0)
                             AND replicated_column_count > 0
                             AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
-                        ORDER BY i.db_schema_object_name DESC OPTION    ( RECOMPILE );
+                        ORDER BY i.db_schema_object_name DESC 
+						OPTION    ( RECOMPILE );
 
             RAISERROR(N'check_id 71: Cascading updates or cascading deletes.', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
                                                secret_columns, index_usage_summary, index_size_summary, more_info )
-            SELECT    71 AS check_id, 
+            SELECT  71 AS check_id, 
                     NULL AS index_sanity_id,
                     150 AS Priority,
                     N'Abnormal Psychology' AS findings_group,
@@ -2928,14 +3667,39 @@ BEGIN;
                     N'N/A' AS secret_columns,
                     N'N/A' AS index_usage_summary,
                     N'N/A' AS index_size_summary,
-                    (SELECT TOP 1 more_info FROM #IndexSanity i WHERE i.object_id=fk.parent_object_id)
+                    (SELECT TOP 1 more_info FROM #IndexSanity i WHERE i.object_id=fk.parent_object_id AND i.database_id = fk.database_id AND i.schema_name = fk.schema_name)
                         AS more_info
             FROM #ForeignKeys fk
             WHERE ([delete_referential_action_desc] <> N'NO_ACTION'
             OR [update_referential_action_desc] <> N'NO_ACTION')
             AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
+			OPTION    ( RECOMPILE );
 
-    END
+			RAISERROR(N'check_id 72: Columnstore indexes with Trace Flag 834', 0,1) WITH NOWAIT;
+                IF EXISTS (SELECT * FROM #IndexSanity WHERE index_type IN (5,6))
+				AND EXISTS (SELECT * FROM #TraceStatus WHERE TraceFlag = 834 AND status = 1)
+				BEGIN
+				INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
+                                               secret_columns, index_usage_summary, index_size_summary )
+                    SELECT  72 AS check_id, 
+                            i.index_sanity_id,
+                            150 AS Priority,
+                            N'Abnormal Psychology' AS findings_group,
+                            'Columnstore Indexes are being used in conjunction with trace flag 834. Visit the link to see why this can be a bad idea' AS finding, 
+                            [database_name] AS [Database Name],
+                            N'https://support.microsoft.com/en-us/kb/3210239' AS URL,
+                            i.db_schema_object_indexid AS details, 
+                            i.index_definition,
+                            i.secret_columns,
+                            i.index_usage_summary,
+                            ISNULL(sz.index_size_summary,'') AS index_size_summary
+                    FROM    #IndexSanity AS i
+                    JOIN #IndexSanitySize sz ON i.index_sanity_id = sz.index_sanity_id
+                    WHERE i.index_type IN (5,6)
+                    OPTION    ( RECOMPILE );
+				END;
+
+    END;
 
          ----------------------------------------
         --Workaholics: Check_id 80-89
@@ -2970,7 +3734,8 @@ BEGIN;
         JOIN #IndexSanitySize iss ON i.index_sanity_id=iss.index_sanity_id
         WHERE ISNULL(i.user_scans,0) > 0
         AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
-        ORDER BY  i.user_scans * iss.total_reserved_MB DESC;
+        ORDER BY  i.user_scans * iss.total_reserved_MB DESC
+		OPTION    ( RECOMPILE );
 
         RAISERROR(N'check_id 81: Top recent accesses (op stats)', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, index_sanity_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
@@ -3001,10 +3766,11 @@ BEGIN;
         JOIN #IndexSanitySize iss ON i.index_sanity_id=iss.index_sanity_id
         WHERE (ISNULL(iss.total_range_scan_count,0)  > 0 OR ISNULL(iss.total_singleton_lookup_count,0) > 0)
         AND NOT (@GetAllDatabases = 1 OR @Mode = 0)
-        ORDER BY ((iss.total_range_scan_count + iss.total_singleton_lookup_count) * iss.total_reserved_MB) DESC;
+        ORDER BY ((iss.total_range_scan_count + iss.total_singleton_lookup_count) * iss.total_reserved_MB) DESC
+		OPTION    ( RECOMPILE );
 
 
-    END
+    END;
 
          ----------------------------------------
         --Statistics Info: Check_id 90-99
@@ -3027,8 +3793,8 @@ BEGIN;
 						' modifications in that time, which is ' +
 						CONVERT(NVARCHAR(100), s.percent_modifications) + 
 						'% of the table.'
-					END,
-				QUOTENAME(database_name) + '.' + QUOTENAME(s.index_name) + '.' + QUOTENAME(s.statistics_name) + '.' + QUOTENAME(s.column_name) AS index_definition,
+					END AS details,
+				QUOTENAME(database_name) + '.' + QUOTENAME(s.schema_name) + '.' + QUOTENAME(s.table_name) + '.' + QUOTENAME(s.index_name) + '.' + QUOTENAME(s.statistics_name) + '.' + QUOTENAME(s.column_names) AS index_definition,
 				'N/A' AS secret_columns,
 				'N/A' AS index_usage_summary,
 				'N/A' AS index_size_summary
@@ -3036,6 +3802,7 @@ BEGIN;
 		WHERE s.last_statistics_update <= CONVERT(DATETIME, GETDATE() - 7) 
 		AND s.percent_modifications >= 10. 
 		AND s.rows >= 10000
+		OPTION    ( RECOMPILE );
 
         RAISERROR(N'check_id 91: Statistics with a low sample rate', 0,1) WITH NOWAIT;
                 INSERT    #BlitzIndexResults ( check_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
@@ -3046,17 +3813,124 @@ BEGIN;
 				'Antisocial Samples',
 				s.database_name,
 				'' AS URL,
-				'Only ' + CONVERT(NVARCHAR(100), s.percent_sampled) + '% of the rows were samplped during the last statistics update. This may lead to poor cardinality estimates.' ,
-				QUOTENAME(database_name) + '.' + QUOTENAME(s.index_name) + '.' + QUOTENAME(s.statistics_name) + '.' + QUOTENAME(s.column_name) AS index_definition,
+				'Only ' + CONVERT(NVARCHAR(100), s.percent_sampled) + '% of the rows were sampled during the last statistics update. This may lead to poor cardinality estimates.' AS details,
+				QUOTENAME(database_name) + '.' + QUOTENAME(s.schema_name) + '.' + QUOTENAME(s.table_name) + '.' + QUOTENAME(s.index_name) + '.' + QUOTENAME(s.statistics_name) + '.' + QUOTENAME(s.column_names) AS index_definition,
 				'N/A' AS secret_columns,
 				'N/A' AS index_usage_summary,
 				'N/A' AS index_size_summary
 		FROM #Statistics AS s
 		WHERE s.rows_sampled < 1.
 		AND s.rows >= 10000
+		OPTION    ( RECOMPILE );
+
+        RAISERROR(N'check_id 92: Statistics with NO RECOMPUTE', 0,1) WITH NOWAIT;
+                INSERT    #BlitzIndexResults ( check_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
+                                               secret_columns, index_usage_summary, index_size_summary )
+		SELECT  92 AS check_id, 
+				200 AS Priority,
+				'Functioning Statistaholics' AS findings_group,
+				'Cyberphobic Samples',
+				s.database_name,
+				'' AS URL,
+				'The statistic ' + QUOTENAME(s.statistics_name) +  ' is set to not recompute. This can be helpful if data is really skewed, but harmful if you expect automatic statistics updates.' AS details,
+				QUOTENAME(database_name) + '.' + QUOTENAME(s.schema_name) + '.' + QUOTENAME(s.table_name) + '.' + QUOTENAME(s.index_name) + '.' + QUOTENAME(s.statistics_name) + '.' + QUOTENAME(s.column_names) AS index_definition,
+				'N/A' AS secret_columns,
+				'N/A' AS index_usage_summary,
+				'N/A' AS index_size_summary
+		FROM #Statistics AS s
+		WHERE s.no_recompute = 1
+		OPTION    ( RECOMPILE );
+
+        RAISERROR(N'check_id 93: Statistics with filters', 0,1) WITH NOWAIT;
+                INSERT    #BlitzIndexResults ( check_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
+                                               secret_columns, index_usage_summary, index_size_summary )
+		SELECT  93 AS check_id, 
+				200 AS Priority,
+				'Functioning Statistaholics' AS findings_group,
+				'Filter Fixation',
+				s.database_name,
+				'' AS URL,
+				'The statistic ' + QUOTENAME(s.statistics_name) +  ' is filtered on [' + s.filter_definition + ']. It could be part of a filtered index, or just a filtered statistic. This is purely informational.' AS details,
+				 QUOTENAME(database_name) + '.' + QUOTENAME(s.schema_name) + '.' + QUOTENAME(s.table_name) + '.' + QUOTENAME(s.index_name) + '.' + QUOTENAME(s.statistics_name) + '.' + QUOTENAME(s.column_names) AS index_definition,
+				'N/A' AS secret_columns,
+				'N/A' AS index_usage_summary,
+				'N/A' AS index_size_summary
+		FROM #Statistics AS s
+		WHERE s.has_filter = 1
+		OPTION    ( RECOMPILE );
+
+		END; 
+
+         ----------------------------------------
+        --Computed Column Info: Check_id 99-109
+        ----------------------------------------
+    BEGIN
+
+	     RAISERROR(N'check_id 99: Computed Columns That Reference Functions', 0,1) WITH NOWAIT;
+                INSERT    #BlitzIndexResults ( check_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
+                                               secret_columns, index_usage_summary, index_size_summary )
+		SELECT  99 AS check_id, 
+				50 AS Priority,
+				'Cold Calculators' AS findings_group,
+				'Serial Forcer' AS finding,
+				cc.database_name,
+				'' AS URL,
+				'The computed column ' + QUOTENAME(cc.column_name) + ' on ' + QUOTENAME(cc.schema_name) + '.' + QUOTENAME(cc.table_name) + ' is based on ' + cc.definition 
+				+ '. That indicates it may reference a scalar function, or a CLR function with data access, which can cause all queries and maintenance to run serially.' AS details,
+				cc.column_definition,
+				'N/A' AS secret_columns,
+				'N/A' AS index_usage_summary,
+				'N/A' AS index_size_summary
+		FROM #ComputedColumns AS cc
+		WHERE cc.is_function = 1
+		OPTION    ( RECOMPILE );
+
+		RAISERROR(N'check_id 100: Computed Columns that are not Persisted.', 0,1) WITH NOWAIT;
+        INSERT    #BlitzIndexResults ( check_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
+                                               secret_columns, index_usage_summary, index_size_summary )
+		SELECT  100 AS check_id, 
+				200 AS Priority,
+				'Cold Calculators' AS findings_group,
+				'Definition Defeatists' AS finding,
+				cc.database_name,
+				'' AS URL,
+				'The computed column ' + QUOTENAME(cc.column_name) + ' on ' + QUOTENAME(cc.schema_name) + '.' + QUOTENAME(cc.table_name) + ' is not persisted, which means it will be calculated when a query runs.' + 
+				'You can change this with the following command, if the definition is deterministic: ALTER TABLE ' + QUOTENAME(cc.schema_name) + '.' + QUOTENAME(cc.table_name) + ' ALTER COLUMN ' + cc.column_name +
+				' ADD PERSISTED'  AS details,
+				cc.column_definition,
+				'N/A' AS secret_columns,
+				'N/A' AS index_usage_summary,
+				'N/A' AS index_size_summary
+		FROM #ComputedColumns AS cc
+		WHERE cc.is_persisted = 0
+		OPTION    ( RECOMPILE );
+
+        ----------------------------------------
+        --Temporal Table Info: Check_id 110-119
+        ----------------------------------------
+		RAISERROR(N'check_id 110: Temporal Tables.', 0,1) WITH NOWAIT;
+        INSERT    #BlitzIndexResults ( check_id, Priority, findings_group, finding, [database_name], URL, details, index_definition,
+                                               secret_columns, index_usage_summary, index_size_summary )
+
+				SELECT  110 AS check_id, 
+				200 AS Priority,
+				'Temporal Tables' AS findings_group,
+				'Obsessive Compulsive Tables',
+				t.database_name,
+				'' AS URL,
+				'The table ' + QUOTENAME(t.schema_name) + '.' + QUOTENAME(t.table_name) + ' is a temporal table, with rows versioned in ' 
+					+ QUOTENAME(t.history_schema_name) + '.' + QUOTENAME(t.history_table_name) + ' on History columns ' + QUOTENAME(t.start_column_name) + ' and ' + QUOTENAME(t.end_column_name) + '.'
+				 AS details,
+				'' AS index_definition,
+				'N/A' AS secret_columns,
+				'N/A' AS index_usage_summary,
+				'N/A' AS index_size_summary
+		FROM #TemporalTables AS t
+		OPTION    ( RECOMPILE );
 
 
-	END 
+
+	END; 
  
         RAISERROR(N'Insert a row to help people find help', 0,1) WITH NOWAIT;
         IF DATEDIFF(MM, @VersionDate, GETDATE()) > 6
@@ -3068,7 +3942,7 @@ BEGIN;
                    'Fine wine gets better with age, but this ' + @ScriptVersionName + ' is more like bad cheese. Time to get a new one.',
                     N'',N'',N''
                     );
-        END
+        END;
 
         IF EXISTS(SELECT * FROM #BlitzIndexResults)
 		BEGIN
@@ -3081,7 +3955,7 @@ BEGIN;
                     N''
                     , N'',N''
                     );
-        END
+        END;
         ELSE IF @Mode = 0 OR (@GetAllDatabases = 1 AND @Mode <> 4)
         BEGIN
             INSERT    #BlitzIndexResults ( Priority, check_id, findings_group, finding, URL, details, index_definition,
@@ -3101,7 +3975,7 @@ BEGIN;
                    'http://FirstResponderKit.org', 'Consider running with @Mode = 4 in individual databases (not all) for more detailed diagnostics.', 'The new default Mode 0 only looks for very serious index issues.', '', ''
                     );
 
-        END
+        END;
         ELSE
         BEGIN
             INSERT    #BlitzIndexResults ( Priority, check_id, findings_group, finding, URL, details, index_definition,
@@ -3121,238 +3995,647 @@ BEGIN;
                    'http://FirstResponderKit.org', 'Time to go read some blog posts.', '', '', ''
                     );
 
-        END
+        END;
 
         RAISERROR(N'Returning results.', 0,1) WITH NOWAIT;
             
         /*Return results.*/
         IF (@Mode = 0)
         BEGIN
+			IF(@OutputType <> 'NONE')
+			BEGIN
+				SELECT Priority, ISNULL(br.findings_group,N'') + 
+						CASE WHEN ISNULL(br.finding,N'') <> N'' THEN N': ' ELSE N'' END
+						+ br.finding AS [Finding], 
+					br.[database_name] AS [Database Name],
+					br.details AS [Details: schema.table.index(indexid)], 
+					br.index_definition AS [Definition: [Property]] ColumnName {datatype maxbytes}], 
+					ISNULL(br.secret_columns,'') AS [Secret Columns],          
+					br.index_usage_summary AS [Usage], 
+					br.index_size_summary AS [Size],
+					COALESCE(br.more_info,sn.more_info,'') AS [More Info],
+					br.URL, 
+					COALESCE(br.create_tsql,ts.create_tsql,'') AS [Create TSQL]
+				FROM #BlitzIndexResults br
+				LEFT JOIN #IndexSanity sn ON 
+					br.index_sanity_id=sn.index_sanity_id
+				LEFT JOIN #IndexCreateTsql ts ON 
+					br.index_sanity_id=ts.index_sanity_id
+				WHERE br.check_id IN (0, 1, 11, 22, 43, 68, 50, 60, 61, 62, 63, 64, 65, 72)
+				ORDER BY br.Priority ASC, br.check_id ASC, br.blitz_result_id ASC, br.findings_group ASC
+				OPTION (RECOMPILE);
+			 END;
 
-            SELECT Priority, ISNULL(br.findings_group,N'') + 
-                    CASE WHEN ISNULL(br.finding,N'') <> N'' THEN N': ' ELSE N'' END
-                    + br.finding AS [Finding], 
-                br.[database_name] AS [Database Name],
-                br.details AS [Details: schema.table.index(indexid)], 
-                br.index_definition AS [Definition: [Property]] ColumnName {datatype maxbytes}], 
-                ISNULL(br.secret_columns,'') AS [Secret Columns],          
-                br.index_usage_summary AS [Usage], 
-                br.index_size_summary AS [Size],
-                COALESCE(br.more_info,sn.more_info,'') AS [More Info],
-                br.URL, 
-                COALESCE(br.create_tsql,ts.create_tsql,'') AS [Create TSQL]
-            FROM #BlitzIndexResults br
-            LEFT JOIN #IndexSanity sn ON 
-                br.index_sanity_id=sn.index_sanity_id
-            LEFT JOIN #IndexCreateTsql ts ON 
-                br.index_sanity_id=ts.index_sanity_id
-            WHERE br.check_id IN (0, 1, 11, 22, 43, 68, 50, 60, 61, 62, 63, 64, 65)
-            ORDER BY br.Priority ASC, br.check_id ASC, br.blitz_result_id ASC, br.findings_group ASC
-			OPTION (RECOMPILE);
-
-        END
+        END;
         ELSE IF (@Mode = 4)
-            SELECT Priority, ISNULL(br.findings_group,N'') + 
-                    CASE WHEN ISNULL(br.finding,N'') <> N'' THEN N': ' ELSE N'' END
-                    + br.finding AS [Finding], 
-				br.[database_name] AS [Database Name],
-                br.details AS [Details: schema.table.index(indexid)], 
-                br.index_definition AS [Definition: [Property]] ColumnName {datatype maxbytes}], 
-                ISNULL(br.secret_columns,'') AS [Secret Columns],          
-                br.index_usage_summary AS [Usage], 
-                br.index_size_summary AS [Size],
-                COALESCE(br.more_info,sn.more_info,'') AS [More Info],
-                br.URL, 
-                COALESCE(br.create_tsql,ts.create_tsql,'') AS [Create TSQL]
-            FROM #BlitzIndexResults br
-            LEFT JOIN #IndexSanity sn ON 
-                br.index_sanity_id=sn.index_sanity_id
-            LEFT JOIN #IndexCreateTsql ts ON 
-                br.index_sanity_id=ts.index_sanity_id
-            ORDER BY br.Priority ASC, br.check_id ASC, br.blitz_result_id ASC, br.findings_group ASC
-			OPTION (RECOMPILE);
+			IF(@OutputType <> 'NONE')
+		 	BEGIN	
+				SELECT Priority, ISNULL(br.findings_group,N'') + 
+						CASE WHEN ISNULL(br.finding,N'') <> N'' THEN N': ' ELSE N'' END
+						+ br.finding AS [Finding], 
+					br.[database_name] AS [Database Name],
+					br.details AS [Details: schema.table.index(indexid)], 
+					br.index_definition AS [Definition: [Property]] ColumnName {datatype maxbytes}], 
+					ISNULL(br.secret_columns,'') AS [Secret Columns],          
+					br.index_usage_summary AS [Usage], 
+					br.index_size_summary AS [Size],
+					COALESCE(br.more_info,sn.more_info,'') AS [More Info],
+					br.URL, 
+					COALESCE(br.create_tsql,ts.create_tsql,'') AS [Create TSQL]
+				FROM #BlitzIndexResults br
+				LEFT JOIN #IndexSanity sn ON 
+					br.index_sanity_id=sn.index_sanity_id
+				LEFT JOIN #IndexCreateTsql ts ON 
+					br.index_sanity_id=ts.index_sanity_id
+				ORDER BY br.Priority ASC, br.check_id ASC, br.blitz_result_id ASC, br.findings_group ASC
+				OPTION (RECOMPILE);
+			 END;
 
     END; /* End @Mode=0 or 4 (diagnose)*/
-    ELSE IF @Mode=1 /*Summarize*/
+    ELSE IF (@Mode=1) /*Summarize*/
     BEGIN
     --This mode is to give some overall stats on the database.
-        RAISERROR(N'@Mode=1, we are summarizing.', 0,1) WITH NOWAIT;
+	 	IF(@OutputType <> 'NONE')
+	 	BEGIN
+			RAISERROR(N'@Mode=1, we are summarizing.', 0,1) WITH NOWAIT;
 
-        SELECT DB_NAME(i.database_id) AS [Database Name],
-            CAST((COUNT(*)) AS NVARCHAR(256)) AS [Number Objects],
-            CAST(CAST(SUM(sz.total_reserved_MB)/
-                1024. AS NUMERIC(29,1)) AS NVARCHAR(500)) AS [All GB],
-            CAST(CAST(SUM(sz.total_reserved_LOB_MB)/
-                1024. AS NUMERIC(29,1)) AS NVARCHAR(500)) AS [LOB GB],
-            CAST(CAST(SUM(sz.total_reserved_row_overflow_MB)/
-                1024. AS NUMERIC(29,1)) AS NVARCHAR(500)) AS [Row Overflow GB],
-            CAST(SUM(CASE WHEN index_id=1 THEN 1 ELSE 0 END)AS NVARCHAR(50)) AS [Clustered Tables],
-            CAST(SUM(CASE WHEN index_id=1 THEN sz.total_reserved_MB ELSE 0 END)
-                /1024. AS NUMERIC(29,1)) AS [Clustered Tables GB],
-            SUM(CASE WHEN index_id NOT IN (0,1) THEN 1 ELSE 0 END) AS [NC Indexes],
-            CAST(SUM(CASE WHEN index_id NOT IN (0,1) THEN sz.total_reserved_MB ELSE 0 END)
-                /1024. AS NUMERIC(29,1)) AS [NC Indexes GB],
-            CASE WHEN SUM(CASE WHEN index_id NOT IN (0,1) THEN sz.total_reserved_MB ELSE 0 END)  > 0 THEN
-                CAST(SUM(CASE WHEN index_id IN (0,1) THEN sz.total_reserved_MB ELSE 0 END)
-                    / SUM(CASE WHEN index_id NOT IN (0,1) THEN sz.total_reserved_MB ELSE 0 END) AS NUMERIC(29,1)) 
-                ELSE 0 END AS [ratio table: NC Indexes],
-            SUM(CASE WHEN index_id=0 THEN 1 ELSE 0 END) AS [Heaps],
-            CAST(SUM(CASE WHEN index_id=0 THEN sz.total_reserved_MB ELSE 0 END)
-                /1024. AS NUMERIC(29,1)) AS [Heaps GB],
-            SUM(CASE WHEN index_id IN (0,1) AND partition_key_column_name IS NOT NULL THEN 1 ELSE 0 END) AS [Partitioned Tables],
-            SUM(CASE WHEN index_id NOT IN (0,1) AND  partition_key_column_name IS NOT NULL THEN 1 ELSE 0 END) AS [Partitioned NCs],
-            CAST(SUM(CASE WHEN partition_key_column_name IS NOT NULL THEN sz.total_reserved_MB ELSE 0 END)/1024. AS NUMERIC(29,1)) AS [Partitioned GB],
-            SUM(CASE WHEN filter_definition <> '' THEN 1 ELSE 0 END) AS [Filtered Indexes],
-            SUM(CASE WHEN is_indexed_view=1 THEN 1 ELSE 0 END) AS [Indexed Views],
-            MAX(total_rows) AS [Max Row Count],
-            CAST(MAX(CASE WHEN index_id IN (0,1) THEN sz.total_reserved_MB ELSE 0 END)
-                /1024. AS NUMERIC(29,1)) AS [Max Table GB],
-            CAST(MAX(CASE WHEN index_id NOT IN (0,1) THEN sz.total_reserved_MB ELSE 0 END)
-                /1024. AS NUMERIC(29,1)) AS [Max NC Index GB],
-            SUM(CASE WHEN index_id IN (0,1) AND sz.total_reserved_MB > 1024 THEN 1 ELSE 0 END) AS [Count Tables > 1GB],
-            SUM(CASE WHEN index_id IN (0,1) AND sz.total_reserved_MB > 10240 THEN 1 ELSE 0 END) AS [Count Tables > 10GB],
-            SUM(CASE WHEN index_id IN (0,1) AND sz.total_reserved_MB > 102400 THEN 1 ELSE 0 END) AS [Count Tables > 100GB],    
-            SUM(CASE WHEN index_id NOT IN (0,1) AND sz.total_reserved_MB > 1024 THEN 1 ELSE 0 END) AS [Count NCs > 1GB],
-            SUM(CASE WHEN index_id NOT IN (0,1) AND sz.total_reserved_MB > 10240 THEN 1 ELSE 0 END) AS [Count NCs > 10GB],
-            SUM(CASE WHEN index_id NOT IN (0,1) AND sz.total_reserved_MB > 102400 THEN 1 ELSE 0 END) AS [Count NCs > 100GB],
-            MIN(create_date) AS [Oldest Create Date],
-            MAX(create_date) AS [Most Recent Create Date],
-            MAX(modify_date) AS [Most Recent Modify Date],
-            1 AS [Display Order]
-        FROM #IndexSanity AS i
-        --left join here so we don't lose disabled nc indexes
-        LEFT JOIN #IndexSanitySize AS sz 
-            ON i.index_sanity_id=sz.index_sanity_id
-		GROUP BY DB_NAME(i.database_id)	 
-        UNION ALL
-        SELECT  CASE WHEN @GetAllDatabases = 1 THEN N'All Databases' ELSE N'Database ' + N' as of ' + CONVERT(NVARCHAR(16),GETDATE(),121) END,        
-                @ScriptVersionName,   
-                N'From Your Community Volunteers' ,   
-                N'http://FirstResponderKit.org' ,
-                N'',
-                NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
-                NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
-                NULL,NULL,0 AS display_order
-        ORDER BY [Display Order] ASC
-        OPTION (RECOMPILE);
+			SELECT DB_NAME(i.database_id) AS [Database Name],
+				CAST((COUNT(*)) AS NVARCHAR(256)) AS [Number Objects],
+				CAST(CAST(SUM(sz.total_reserved_MB)/
+					1024. AS NUMERIC(29,1)) AS NVARCHAR(500)) AS [All GB],
+				CAST(CAST(SUM(sz.total_reserved_LOB_MB)/
+					1024. AS NUMERIC(29,1)) AS NVARCHAR(500)) AS [LOB GB],
+				CAST(CAST(SUM(sz.total_reserved_row_overflow_MB)/
+					1024. AS NUMERIC(29,1)) AS NVARCHAR(500)) AS [Row Overflow GB],
+				CAST(SUM(CASE WHEN index_id=1 THEN 1 ELSE 0 END)AS NVARCHAR(50)) AS [Clustered Tables],
+				CAST(SUM(CASE WHEN index_id=1 THEN sz.total_reserved_MB ELSE 0 END)
+					/1024. AS NUMERIC(29,1)) AS [Clustered Tables GB],
+				SUM(CASE WHEN index_id NOT IN (0,1) THEN 1 ELSE 0 END) AS [NC Indexes],
+				CAST(SUM(CASE WHEN index_id NOT IN (0,1) THEN sz.total_reserved_MB ELSE 0 END)
+					/1024. AS NUMERIC(29,1)) AS [NC Indexes GB],
+				CASE WHEN SUM(CASE WHEN index_id NOT IN (0,1) THEN sz.total_reserved_MB ELSE 0 END)  > 0 THEN
+					CAST(SUM(CASE WHEN index_id IN (0,1) THEN sz.total_reserved_MB ELSE 0 END)
+						/ SUM(CASE WHEN index_id NOT IN (0,1) THEN sz.total_reserved_MB ELSE 0 END) AS NUMERIC(29,1)) 
+					ELSE 0 END AS [ratio table: NC Indexes],
+				SUM(CASE WHEN index_id=0 THEN 1 ELSE 0 END) AS [Heaps],
+				CAST(SUM(CASE WHEN index_id=0 THEN sz.total_reserved_MB ELSE 0 END)
+					/1024. AS NUMERIC(29,1)) AS [Heaps GB],
+				SUM(CASE WHEN index_id IN (0,1) AND partition_key_column_name IS NOT NULL THEN 1 ELSE 0 END) AS [Partitioned Tables],
+				SUM(CASE WHEN index_id NOT IN (0,1) AND  partition_key_column_name IS NOT NULL THEN 1 ELSE 0 END) AS [Partitioned NCs],
+				CAST(SUM(CASE WHEN partition_key_column_name IS NOT NULL THEN sz.total_reserved_MB ELSE 0 END)/1024. AS NUMERIC(29,1)) AS [Partitioned GB],
+				SUM(CASE WHEN filter_definition <> '' THEN 1 ELSE 0 END) AS [Filtered Indexes],
+				SUM(CASE WHEN is_indexed_view=1 THEN 1 ELSE 0 END) AS [Indexed Views],
+				MAX(total_rows) AS [Max Row Count],
+				CAST(MAX(CASE WHEN index_id IN (0,1) THEN sz.total_reserved_MB ELSE 0 END)
+					/1024. AS NUMERIC(29,1)) AS [Max Table GB],
+				CAST(MAX(CASE WHEN index_id NOT IN (0,1) THEN sz.total_reserved_MB ELSE 0 END)
+					/1024. AS NUMERIC(29,1)) AS [Max NC Index GB],
+				SUM(CASE WHEN index_id IN (0,1) AND sz.total_reserved_MB > 1024 THEN 1 ELSE 0 END) AS [Count Tables > 1GB],
+				SUM(CASE WHEN index_id IN (0,1) AND sz.total_reserved_MB > 10240 THEN 1 ELSE 0 END) AS [Count Tables > 10GB],
+				SUM(CASE WHEN index_id IN (0,1) AND sz.total_reserved_MB > 102400 THEN 1 ELSE 0 END) AS [Count Tables > 100GB],    
+				SUM(CASE WHEN index_id NOT IN (0,1) AND sz.total_reserved_MB > 1024 THEN 1 ELSE 0 END) AS [Count NCs > 1GB],
+				SUM(CASE WHEN index_id NOT IN (0,1) AND sz.total_reserved_MB > 10240 THEN 1 ELSE 0 END) AS [Count NCs > 10GB],
+				SUM(CASE WHEN index_id NOT IN (0,1) AND sz.total_reserved_MB > 102400 THEN 1 ELSE 0 END) AS [Count NCs > 100GB],
+				MIN(create_date) AS [Oldest Create Date],
+				MAX(create_date) AS [Most Recent Create Date],
+				MAX(modify_date) AS [Most Recent Modify Date],
+				1 AS [Display Order]
+			FROM #IndexSanity AS i
+			--left join here so we don't lose disabled nc indexes
+			LEFT JOIN #IndexSanitySize AS sz 
+				ON i.index_sanity_id=sz.index_sanity_id
+			GROUP BY DB_NAME(i.database_id)	 
+			UNION ALL
+			SELECT  CASE WHEN @GetAllDatabases = 1 THEN N'All Databases' ELSE N'Database ' + N' as of ' + CONVERT(NVARCHAR(16),GETDATE(),121) END,        
+					@ScriptVersionName,   
+					N'From Your Community Volunteers' ,   
+					N'http://FirstResponderKit.org' ,
+					N'',
+					NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
+					NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
+					NULL,NULL,0 AS display_order
+			ORDER BY [Display Order] ASC
+			OPTION (RECOMPILE);
+	  	END;
            
-    END /* End @Mode=1 (summarize)*/
-    ELSE IF @Mode=2 /*Index Detail*/
+    END; /* End @Mode=1 (summarize)*/
+    ELSE IF (@Mode=2) /*Index Detail*/
     BEGIN
         --This mode just spits out all the detail without filters.
         --This supports slicing AND dicing in Excel
         RAISERROR(N'@Mode=2, here''s the details on existing indexes.', 0,1) WITH NOWAIT;
 
-        SELECT  [database_name] AS [Database Name], 
-                [schema_name] AS [Schema Name], 
-                [object_name] AS [Object Name], 
-                ISNULL(index_name, '') AS [Index Name], 
-                CAST(index_id AS VARCHAR(10))AS [Index ID],
-                db_schema_object_indexid AS [Details: schema.table.index(indexid)], 
-                CASE    WHEN index_id IN ( 1, 0 ) THEN 'TABLE'
-                    ELSE 'NonClustered'
-                    END AS [Object Type], 
-                index_definition AS [Definition: [Property]] ColumnName {datatype maxbytes}],
-                ISNULL(LTRIM(key_column_names_with_sort_order), '') AS [Key Column Names With Sort],
-                ISNULL(count_key_columns, 0) AS [Count Key Columns],
-                ISNULL(include_column_names, '') AS [Include Column Names], 
-                ISNULL(count_included_columns,0) AS [Count Included Columns],
-                ISNULL(secret_columns,'') AS [Secret Column Names], 
-                ISNULL(count_secret_columns,0) AS [Count Secret Columns],
-                ISNULL(partition_key_column_name, '') AS [Partition Key Column Name],
-                ISNULL(filter_definition, '') AS [Filter Definition], 
-                is_indexed_view AS [Is Indexed View], 
-                is_primary_key AS [Is Primary Key],
-                is_XML AS [Is XML],
-                is_spatial AS [Is Spatial],
-                is_NC_columnstore AS [Is NC Columnstore],
-                is_CX_columnstore AS [Is CX Columnstore],
-                is_disabled AS [Is Disabled], 
-                is_hypothetical AS [Is Hypothetical],
-                is_padded AS [Is Padded], 
-                fill_factor AS [Fill Factor], 
-                is_referenced_by_foreign_key AS [Is Reference by Foreign Key], 
-                last_user_seek AS [Last User Seek], 
-                last_user_scan AS [Last User Scan], 
-                last_user_lookup AS [Last User Lookup],
-                last_user_update AS [Last User Update], 
-                total_reads AS [Total Reads], 
-                user_updates AS [User Updates], 
-                reads_per_write AS [Reads Per Write], 
-                index_usage_summary AS [Index Usage], 
-                sz.partition_count AS [Partition Count],
-                sz.total_rows AS [Rows], 
-                sz.total_reserved_MB AS [Reserved MB], 
-                sz.total_reserved_LOB_MB AS [Reserved LOB MB], 
-                sz.total_reserved_row_overflow_MB AS [Reserved Row Overflow MB],
-                sz.index_size_summary AS [Index Size], 
-                sz.total_row_lock_count AS [Row Lock Count],
-                sz.total_row_lock_wait_count AS [Row Lock Wait Count],
-                sz.total_row_lock_wait_in_ms AS [Row Lock Wait ms],
-                sz.avg_row_lock_wait_in_ms AS [Avg Row Lock Wait ms],
-                sz.total_page_lock_count AS [Page Lock Count],
-                sz.total_page_lock_wait_count AS [Page Lock Wait Count],
-                sz.total_page_lock_wait_in_ms AS [Page Lock Wait ms],
-                sz.avg_page_lock_wait_in_ms AS [Avg Page Lock Wait ms],
-                sz.total_index_lock_promotion_attempt_count AS [Lock Escalation Attempts],
-                sz.total_index_lock_promotion_count AS [Lock Escalations],
-                sz.data_compression_desc AS [Data Compression],
-                i.create_date AS [Create Date],
-                i.modify_date AS [Modify Date],
-                more_info AS [More Info],
-                1 AS [Display Order]
-        FROM    #IndexSanity AS i --left join here so we don't lose disabled nc indexes
-                LEFT JOIN #IndexSanitySize AS sz ON i.index_sanity_id = sz.index_sanity_id
-        ORDER BY [Database Name], [Schema Name], [Object Name], [Index ID]
-        OPTION (RECOMPILE);
+		
+		/* Checks if @OutputServerName is populated with a valid linked server, and that the database name specified is valid */
+		DECLARE @ValidOutputServer BIT;
+		DECLARE @ValidOutputLocation BIT;
+		DECLARE @LinkedServerDBCheck NVARCHAR(2000);
+		DECLARE @ValidLinkedServerDB INT;
+		DECLARE @tmpdbchk TABLE (cnt INT);
+		DECLARE @StringToExecute NVARCHAR(MAX);
+		
+		IF @OutputServerName IS NOT NULL
+			BEGIN
+				IF (SUBSTRING(@OutputTableName, 2, 1) = '#')
+					BEGIN
+						RAISERROR('Due to the nature of temporary tables, outputting to a linked server requires a permanent table.', 16, 0);
+					END;
+				ELSE IF EXISTS (SELECT server_id FROM sys.servers WHERE QUOTENAME([name]) = @OutputServerName)
+					BEGIN
+						SET @LinkedServerDBCheck = 'SELECT 1 WHERE EXISTS (SELECT * FROM '+@OutputServerName+'.master.sys.databases WHERE QUOTENAME([name]) = '''+@OutputDatabaseName+''')';
+						INSERT INTO @tmpdbchk EXEC sys.sp_executesql @LinkedServerDBCheck;
+						SET @ValidLinkedServerDB = (SELECT COUNT(*) FROM @tmpdbchk);
+						IF (@ValidLinkedServerDB > 0)
+							BEGIN
+								SET @ValidOutputServer = 1;
+								SET @ValidOutputLocation = 1;
+							END;
+						ELSE
+							RAISERROR('The specified database was not found on the output server', 16, 0);
+					END;
+				ELSE
+					BEGIN
+						RAISERROR('The specified output server was not found', 16, 0);
+					END;
+			END;
+		ELSE
+			BEGIN
+				IF (SUBSTRING(@OutputTableName, 2, 2) = '##')
+					BEGIN
+						SET @StringToExecute = N' IF (OBJECT_ID(''[tempdb].[dbo].@@@OutputTableName@@@'') IS NOT NULL) DROP TABLE @@@OutputTableName@@@';
+						SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputTableName@@@', @OutputTableName); 
+						EXEC(@StringToExecute);
+						
+						SET @OutputServerName = QUOTENAME(CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128)));
+						SET @OutputDatabaseName = '[tempdb]';
+						SET @OutputSchemaName = '[dbo]';
+						SET @ValidOutputLocation = 1;
+					END;
+				ELSE IF (SUBSTRING(@OutputTableName, 2, 1) = '#')
+					BEGIN
+						RAISERROR('Due to the nature of Dymamic SQL, only global (i.e. double pound (##)) temp tables are supported for @OutputTableName', 16, 0);
+					END;
+				ELSE IF @OutputDatabaseName IS NOT NULL
+					AND @OutputSchemaName IS NOT NULL
+					AND @OutputTableName IS NOT NULL
+					AND EXISTS ( SELECT *
+						 FROM   sys.databases
+						 WHERE  QUOTENAME([name]) = @OutputDatabaseName)
+					BEGIN
+						SET @ValidOutputLocation = 1;
+						SET @OutputServerName = QUOTENAME(CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128)));
+					END;
+				ELSE IF @OutputDatabaseName IS NOT NULL
+					AND @OutputSchemaName IS NOT NULL
+					AND @OutputTableName IS NOT NULL
+					AND NOT EXISTS ( SELECT *
+						 FROM   sys.databases
+						 WHERE  QUOTENAME([name]) = @OutputDatabaseName)
+					BEGIN
+						RAISERROR('The specified output database was not found on this server', 16, 0);
+					END;
+				ELSE
+					BEGIN
+						SET @ValidOutputLocation = 0; 
+					END;
+			END;
+																										
+        IF (@ValidOutputLocation = 0 AND @OutputType = 'NONE')
+        BEGIN
+            RAISERROR('Invalid output location and no output asked',12,1);
+            RETURN;
+        END;
+																										
+		/* @OutputTableName lets us export the results to a permanent table */
+		DECLARE @RunID UNIQUEIDENTIFIER;
+		SET @RunID = NEWID();
+		
+		IF (@ValidOutputLocation = 1 AND COALESCE(@OutputServerName, @OutputDatabaseName, @OutputSchemaName, @OutputTableName) IS NOT NULL)
+			BEGIN
+				DECLARE @TableExists BIT;
+				DECLARE @SchemaExists BIT;
+				SET @StringToExecute = 
+					N'SET @SchemaExists = 0;
+					SET @TableExists = 0;
+					IF EXISTS(SELECT * FROM @@@OutputServerName@@@.@@@OutputDatabaseName@@@.INFORMATION_SCHEMA.SCHEMATA WHERE QUOTENAME(SCHEMA_NAME) = ''@@@OutputSchemaName@@@'') 
+						SET @SchemaExists = 1
+					IF EXISTS (SELECT * FROM @@@OutputServerName@@@.@@@OutputDatabaseName@@@.INFORMATION_SCHEMA.TABLES WHERE QUOTENAME(TABLE_SCHEMA) = ''@@@OutputSchemaName@@@'' AND QUOTENAME(TABLE_NAME) = ''@@@OutputTableName@@@'')
+						SET @TableExists = 1';
+	
+				SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputServerName@@@', @OutputServerName);
+				SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputDatabaseName@@@', @OutputDatabaseName);
+				SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputSchemaName@@@', @OutputSchemaName); 
+				SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputTableName@@@', @OutputTableName);
+	
+				EXEC sp_executesql @StringToExecute, N'@TableExists BIT OUTPUT, @SchemaExists BIT OUTPUT', @TableExists OUTPUT, @SchemaExists OUTPUT;
+				
+				IF @SchemaExists = 1
+					BEGIN
+						IF @TableExists = 0
+							BEGIN
+								SET @StringToExecute = 
+									N'CREATE TABLE @@@OutputDatabaseName@@@.@@@OutputSchemaName@@@.@@@OutputTableName@@@ 
+										(
+											[id] INT IDENTITY(1,1) NOT NULL, 
+											[run_id] UNIQUEIDENTIFIER,
+											[run_datetime] DATETIME, 
+											[server_name] NVARCHAR(128), 
+											[database_name] NVARCHAR(128), 
+											[schema_name] NVARCHAR(128), 
+											[table_name] NVARCHAR(128), 
+											[index_name] NVARCHAR(128), 
+											[index_id] INT, 
+											[db_schema_object_indexid] NVARCHAR(500), 
+											[object_type] NVARCHAR(15), 
+											[index_definition] NVARCHAR(4000), 
+											[key_column_names_with_sort_order] NVARCHAR(MAX), 
+											[count_key_columns] INT, 
+											[include_column_names] NVARCHAR(MAX), 
+											[count_included_columns] INT, 
+											[secret_columns] NVARCHAR(MAX), 
+											[count_secret_columns] INT, 
+											[partition_key_column_name] NVARCHAR(MAX), 
+											[filter_definition] NVARCHAR(MAX), 
+											[is_indexed_view] BIT, 
+											[is_primary_key] BIT, 
+											[is_XML] BIT, 
+											[is_spatial] BIT, 
+											[is_NC_columnstore] BIT, 
+											[is_CX_columnstore] BIT, 
+											[is_disabled] BIT, 
+											[is_hypothetical] BIT, 
+											[is_padded] BIT, 
+											[fill_factor] INT, 
+											[is_referenced_by_foreign_key] BIT,
+											[last_user_seek] DATETIME, 
+											[last_user_scan] DATETIME, 
+											[last_user_lookup] DATETIME, 
+											[last_user_update] DATETIME, 
+											[total_reads] BIGINT, 
+											[user_updates] BIGINT, 
+											[reads_per_write] MONEY, 
+											[index_usage_summary] NVARCHAR(200), 
+											[partition_count] INT, 
+											[total_rows] BIGINT, 
+											[total_reserved_MB] NUMERIC(29,2), 
+											[total_reserved_LOB_MB] NUMERIC(29,2), 
+											[total_reserved_row_overflow_MB] NUMERIC(29,2), 
+											[index_size_summary] NVARCHAR(300), 
+											[total_row_lock_count] BIGINT, 
+											[total_row_lock_wait_count] BIGINT, 
+											[total_row_lock_wait_in_ms] BIGINT, 
+											[avg_row_lock_wait_in_ms] BIGINT, 
+											[total_page_lock_count] BIGINT, 
+											[total_page_lock_wait_count] BIGINT, 
+											[total_page_lock_wait_in_ms] BIGINT, 
+											[avg_page_lock_wait_in_ms] BIGINT, 
+											[total_index_lock_promotion_attempt_count] BIGINT, 
+											[total_index_lock_promotion_count] BIGINT, 
+											[data_compression_desc] NVARCHAR(4000), 
+						                    [page_latch_wait_count] BIGINT,
+								            [page_latch_wait_in_ms] BIGINT,
+								            [page_io_latch_wait_count] BIGINT,								
+								            [page_io_latch_wait_in_ms] BIGINT,
+											[create_date] DATETIME, 
+											[modify_date] DATETIME, 
+											[more_info] NVARCHAR(500),
+											[display_order] INT,
+											CONSTRAINT [PK_ID_@@@RunID@@@] PRIMARY KEY CLUSTERED ([id] ASC)
+										);';
+		
+								SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputDatabaseName@@@', @OutputDatabaseName);
+								SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputSchemaName@@@', @OutputSchemaName); 
+								SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputTableName@@@', @OutputTableName); 
+								SET @StringToExecute = REPLACE(@StringToExecute, '@@@RunID@@@', @RunID); 
+								
+								IF @ValidOutputServer = 1
+									BEGIN
+										SET @StringToExecute = REPLACE(@StringToExecute,'''','''''');
+										EXEC('EXEC('''+@StringToExecute+''') AT ' + @OutputServerName);
+									END;   
+								ELSE
+									BEGIN
+										EXEC(@StringToExecute);
+									END;
+							END; /* @TableExists = 0 */
+					
+						SET @StringToExecute = 
+							N'IF EXISTS(SELECT * FROM @@@OutputServerName@@@.@@@OutputDatabaseName@@@.INFORMATION_SCHEMA.SCHEMATA WHERE QUOTENAME(SCHEMA_NAME) = ''@@@OutputSchemaName@@@'') 
+								AND NOT EXISTS (SELECT * FROM @@@OutputServerName@@@.@@@OutputDatabaseName@@@.INFORMATION_SCHEMA.TABLES WHERE QUOTENAME(TABLE_SCHEMA) = ''@@@OutputSchemaName@@@'' AND QUOTENAME(TABLE_NAME) = ''@@@OutputTableName@@@'')
+								SET @TableExists = 0
+							ELSE
+								SET @TableExists = 1';
+				
+						SET @TableExists = NULL;
+						SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputServerName@@@', @OutputServerName);
+						SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputDatabaseName@@@', @OutputDatabaseName);
+						SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputSchemaName@@@', @OutputSchemaName); 
+						SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputTableName@@@', @OutputTableName); 
+			
+						EXEC sp_executesql @StringToExecute, N'@TableExists BIT OUTPUT', @TableExists OUTPUT;
+						
+						IF @TableExists = 1
+							BEGIN
+								SET @StringToExecute = 
+									N'INSERT @@@OutputServerName@@@.@@@OutputDatabaseName@@@.@@@OutputSchemaName@@@.@@@OutputTableName@@@
+										(
+											[run_id], 
+											[run_datetime], 
+											[server_name], 
+											[database_name], 
+											[schema_name], 
+											[table_name], 
+											[index_name], 
+											[index_id], 
+											[db_schema_object_indexid], 
+											[object_type], 
+											[index_definition], 
+											[key_column_names_with_sort_order], 
+											[count_key_columns], 
+											[include_column_names], 
+											[count_included_columns], 
+											[secret_columns], 
+											[count_secret_columns], 
+											[partition_key_column_name], 
+											[filter_definition], 
+											[is_indexed_view], 
+											[is_primary_key], 
+											[is_XML], 
+											[is_spatial], 
+											[is_NC_columnstore], 
+											[is_CX_columnstore], 
+											[is_disabled], 
+											[is_hypothetical], 
+											[is_padded], 
+											[fill_factor], 
+											[is_referenced_by_foreign_key], 
+											[last_user_seek], 
+											[last_user_scan], 
+											[last_user_lookup], 
+											[last_user_update], 
+											[total_reads], 
+											[user_updates], 
+											[reads_per_write], 
+											[index_usage_summary], 
+											[partition_count], 
+											[total_rows], 
+											[total_reserved_MB], 
+											[total_reserved_LOB_MB], 
+											[total_reserved_row_overflow_MB], 
+											[index_size_summary], 
+											[total_row_lock_count], 
+											[total_row_lock_wait_count], 
+											[total_row_lock_wait_in_ms], 
+											[avg_row_lock_wait_in_ms], 
+											[total_page_lock_count], 
+											[total_page_lock_wait_count], 
+											[total_page_lock_wait_in_ms], 
+											[avg_page_lock_wait_in_ms], 
+											[total_index_lock_promotion_attempt_count], 
+											[total_index_lock_promotion_count], 
+											[data_compression_desc], 
+						                    [page_latch_wait_count],
+								            [page_latch_wait_in_ms],
+								            [page_io_latch_wait_count],								
+								            [page_io_latch_wait_in_ms],
+											[create_date], 
+											[modify_date], 
+											[more_info],
+											[display_order]
+										)
+									SELECT ''@@@RunID@@@'',
+										''@@@GETDATE@@@'',
+										''@@@LocalServerName@@@'',
+										-- Below should be a copy/paste of the real query
+										-- Make sure all quotes are escaped
+										i.[database_name] AS [Database Name], 
+										i.[schema_name] AS [Schema Name], 
+										i.[object_name] AS [Object Name], 
+										ISNULL(i.index_name, '''') AS [Index Name], 
+										CAST(i.index_id AS NVARCHAR(10))AS [Index ID],
+										db_schema_object_indexid AS [Details: schema.table.index(indexid)], 
+										CASE    WHEN index_id IN ( 1, 0 ) THEN ''TABLE''
+											ELSE ''NonClustered''
+											END AS [Object Type], 
+										index_definition AS [Definition: [Property]] ColumnName {datatype maxbytes}],
+										ISNULL(LTRIM(key_column_names_with_sort_order), '''') AS [Key Column Names With Sort],
+										ISNULL(count_key_columns, 0) AS [Count Key Columns],
+										ISNULL(include_column_names, '''') AS [Include Column Names], 
+										ISNULL(count_included_columns,0) AS [Count Included Columns],
+										ISNULL(secret_columns,'''') AS [Secret Column Names], 
+										ISNULL(count_secret_columns,0) AS [Count Secret Columns],
+										ISNULL(partition_key_column_name, '''') AS [Partition Key Column Name],
+										ISNULL(filter_definition, '''') AS [Filter Definition], 
+										is_indexed_view AS [Is Indexed View], 
+										is_primary_key AS [Is Primary Key],
+										is_XML AS [Is XML],
+										is_spatial AS [Is Spatial],
+										is_NC_columnstore AS [Is NC Columnstore],
+										is_CX_columnstore AS [Is CX Columnstore],
+										is_disabled AS [Is Disabled], 
+										is_hypothetical AS [Is Hypothetical],
+										is_padded AS [Is Padded], 
+										fill_factor AS [Fill Factor], 
+										is_referenced_by_foreign_key AS [Is Reference by Foreign Key], 
+										last_user_seek AS [Last User Seek], 
+										last_user_scan AS [Last User Scan], 
+										last_user_lookup AS [Last User Lookup],
+										last_user_update AS [Last User Update], 
+										total_reads AS [Total Reads], 
+										user_updates AS [User Updates], 
+										reads_per_write AS [Reads Per Write], 
+										index_usage_summary AS [Index Usage], 
+										sz.partition_count AS [Partition Count],
+										sz.total_rows AS [Rows], 
+										sz.total_reserved_MB AS [Reserved MB], 
+										sz.total_reserved_LOB_MB AS [Reserved LOB MB], 
+										sz.total_reserved_row_overflow_MB AS [Reserved Row Overflow MB],
+										sz.index_size_summary AS [Index Size], 
+										sz.total_row_lock_count AS [Row Lock Count],
+										sz.total_row_lock_wait_count AS [Row Lock Wait Count],
+										sz.total_row_lock_wait_in_ms AS [Row Lock Wait ms],
+										sz.avg_row_lock_wait_in_ms AS [Avg Row Lock Wait ms],
+										sz.total_page_lock_count AS [Page Lock Count],
+										sz.total_page_lock_wait_count AS [Page Lock Wait Count],
+										sz.total_page_lock_wait_in_ms AS [Page Lock Wait ms],
+										sz.avg_page_lock_wait_in_ms AS [Avg Page Lock Wait ms],
+										sz.total_index_lock_promotion_attempt_count AS [Lock Escalation Attempts],
+										sz.total_index_lock_promotion_count AS [Lock Escalations],
+										sz.data_compression_desc AS [Data Compression],
+						                sz.page_latch_wait_count,
+								        sz.page_latch_wait_in_ms,
+								        sz.page_io_latch_wait_count,								
+								        sz.page_io_latch_wait_in_ms,
+										i.create_date AS [Create Date],
+										i.modify_date AS [Modify Date],
+										more_info AS [More Info],
+										1 AS [Display Order]
+									FROM #IndexSanity AS i
+									LEFT JOIN #IndexSanitySize AS sz ON i.index_sanity_id = sz.index_sanity_id
+									ORDER BY [Database Name], [Schema Name], [Object Name], [Index ID]
+									OPTION (RECOMPILE);';
+	
+								SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputServerName@@@', @OutputServerName);
+								SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputDatabaseName@@@', @OutputDatabaseName);
+								SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputSchemaName@@@', @OutputSchemaName); 
+								SET @StringToExecute = REPLACE(@StringToExecute, '@@@OutputTableName@@@', @OutputTableName); 
+								SET @StringToExecute = REPLACE(@StringToExecute, '@@@RunID@@@', @RunID);
+								SET @StringToExecute = REPLACE(@StringToExecute, '@@@GETDATE@@@', GETDATE());
+								SET @StringToExecute = REPLACE(@StringToExecute, '@@@LocalServerName@@@', CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128)));
+								EXEC(@StringToExecute);
+							END; /* @TableExists = 1 */
+						ELSE
+							RAISERROR('Creation of the output table failed.', 16, 0);
+					END; /* @TableExists = 0 */
+				ELSE
+					RAISERROR (N'Invalid schema name, data could not be saved.', 16, 0);
+			END; /* @ValidOutputLocation = 1 */
+		ELSE
+	
+		IF(@OutputType <> 'NONE')
+		BEGIN
+			SELECT  i.[database_name] AS [Database Name], 
+					i.[schema_name] AS [Schema Name], 
+					i.[object_name] AS [Object Name], 
+					ISNULL(i.index_name, '') AS [Index Name], 
+					CAST(i.index_id AS NVARCHAR(10))AS [Index ID],
+					db_schema_object_indexid AS [Details: schema.table.index(indexid)], 
+					CASE    WHEN index_id IN ( 1, 0 ) THEN 'TABLE'
+						ELSE 'NonClustered'
+						END AS [Object Type], 
+					index_definition AS [Definition: [Property]] ColumnName {datatype maxbytes}],
+					ISNULL(LTRIM(key_column_names_with_sort_order), '') AS [Key Column Names With Sort],
+					ISNULL(count_key_columns, 0) AS [Count Key Columns],
+					ISNULL(include_column_names, '') AS [Include Column Names], 
+					ISNULL(count_included_columns,0) AS [Count Included Columns],
+					ISNULL(secret_columns,'') AS [Secret Column Names], 
+					ISNULL(count_secret_columns,0) AS [Count Secret Columns],
+					ISNULL(partition_key_column_name, '') AS [Partition Key Column Name],
+					ISNULL(filter_definition, '') AS [Filter Definition], 
+					is_indexed_view AS [Is Indexed View], 
+					is_primary_key AS [Is Primary Key],
+					is_XML AS [Is XML],
+					is_spatial AS [Is Spatial],
+					is_NC_columnstore AS [Is NC Columnstore],
+					is_CX_columnstore AS [Is CX Columnstore],
+					is_disabled AS [Is Disabled], 
+					is_hypothetical AS [Is Hypothetical],
+					is_padded AS [Is Padded], 
+					fill_factor AS [Fill Factor], 
+					is_referenced_by_foreign_key AS [Is Reference by Foreign Key], 
+					last_user_seek AS [Last User Seek], 
+					last_user_scan AS [Last User Scan], 
+					last_user_lookup AS [Last User Lookup],
+					last_user_update AS [Last User Update], 
+					total_reads AS [Total Reads], 
+					user_updates AS [User Updates], 
+					reads_per_write AS [Reads Per Write], 
+					index_usage_summary AS [Index Usage], 
+					sz.partition_count AS [Partition Count],
+					sz.total_rows AS [Rows], 
+					sz.total_reserved_MB AS [Reserved MB], 
+					sz.total_reserved_LOB_MB AS [Reserved LOB MB], 
+					sz.total_reserved_row_overflow_MB AS [Reserved Row Overflow MB],
+					sz.index_size_summary AS [Index Size], 
+					sz.total_row_lock_count AS [Row Lock Count],
+					sz.total_row_lock_wait_count AS [Row Lock Wait Count],
+					sz.total_row_lock_wait_in_ms AS [Row Lock Wait ms],
+					sz.avg_row_lock_wait_in_ms AS [Avg Row Lock Wait ms],
+					sz.total_page_lock_count AS [Page Lock Count],
+					sz.total_page_lock_wait_count AS [Page Lock Wait Count],
+					sz.total_page_lock_wait_in_ms AS [Page Lock Wait ms],
+					sz.avg_page_lock_wait_in_ms AS [Avg Page Lock Wait ms],
+					sz.total_index_lock_promotion_attempt_count AS [Lock Escalation Attempts],
+					sz.total_index_lock_promotion_count AS [Lock Escalations],
+					sz.page_latch_wait_count AS [Page Latch Wait Count],
+					sz.page_latch_wait_in_ms AS [Page Latch Wait ms],
+					sz.page_io_latch_wait_count AS [Page IO Latch Wait Count],								
+					sz.page_io_latch_wait_in_ms as [Page IO Latch Wait ms],
+					sz.data_compression_desc AS [Data Compression],
+					i.create_date AS [Create Date],
+					i.modify_date AS [Modify Date],
+					more_info AS [More Info],
+					1 AS [Display Order]
+			FROM    #IndexSanity AS i --left join here so we don't lose disabled nc indexes
+					LEFT JOIN #IndexSanitySize AS sz ON i.index_sanity_id = sz.index_sanity_id
+			ORDER BY [Database Name], [Schema Name], [Object Name], [Index ID]
+			OPTION (RECOMPILE);
+  		END;
 
 
 
-    END /* End @Mode=2 (index detail)*/
-    ELSE IF @Mode=3 /*Missing index Detail*/
+    END; /* End @Mode=2 (index detail)*/
+    ELSE IF (@Mode=3) /*Missing index Detail*/
     BEGIN
-        SELECT 
-            database_name AS [Database Name], 
-            [schema_name] AS [Schema], 
-            table_name AS [Table], 
-            CAST((magic_benefit_number/@DaysUptime) AS BIGINT)
-                AS [Magic Benefit Number], 
-            missing_index_details AS [Missing Index Details], 
-            avg_total_user_cost AS [Avg Query Cost], 
-            avg_user_impact AS [Est Index Improvement], 
-            user_seeks AS [Seeks], 
-            user_scans AS [Scans],
-            unique_compiles AS [Compiles], 
-            equality_columns AS [Equality Columns], 
-            inequality_columns AS [Inequality Columns], 
-            included_columns AS [Included Columns], 
-            index_estimated_impact AS [Estimated Impact], 
-            create_tsql AS [Create TSQL], 
-            more_info AS [More Info],
-            1 AS [Display Order]
-        FROM #MissingIndexes
-        /* Minimum benefit threshold = 100k/day of uptime */
-        WHERE (magic_benefit_number/@DaysUptime) >= 100000
-        UNION ALL
-        SELECT                 
-            @ScriptVersionName,   
-            N'From Your Community Volunteers' ,   
-            N'http://FirstResponderKit.org' ,
-            100000000000,
-            N'',
-            NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
-            NULL, 0 AS display_order
-        ORDER BY [Display Order] ASC, [Magic Benefit Number] DESC
-		OPTION (RECOMPILE);
+		IF(@OutputType <> 'NONE')
+		BEGIN;
+			WITH create_date AS (
+						SELECT i.database_id,
+							   i.schema_name,
+							   i.[object_id], 
+							   ISNULL(NULLIF(MAX(DATEDIFF(DAY, i.create_date, SYSDATETIME())), 0), 1) AS create_days
+						FROM #IndexSanity AS i
+						GROUP BY i.database_id, i.schema_name, i.object_id
+						)
+			SELECT 
+				mi.database_name AS [Database Name], 
+				mi.[schema_name] AS [Schema], 
+				mi.table_name AS [Table], 
+				CAST((mi.magic_benefit_number / CASE WHEN cd.create_days < @DaysUptime THEN cd.create_days ELSE @DaysUptime END) AS BIGINT)
+					AS [Magic Benefit Number], 
+				mi.missing_index_details AS [Missing Index Details], 
+				mi.avg_total_user_cost AS [Avg Query Cost], 
+				mi.avg_user_impact AS [Est Index Improvement], 
+				mi.user_seeks AS [Seeks], 
+				mi.user_scans AS [Scans],
+				mi.unique_compiles AS [Compiles], 
+				mi.equality_columns AS [Equality Columns], 
+				mi.inequality_columns AS [Inequality Columns], 
+				mi.included_columns AS [Included Columns], 
+				mi.index_estimated_impact AS [Estimated Impact], 
+				mi.create_tsql AS [Create TSQL], 
+				mi.more_info AS [More Info],
+				1 AS [Display Order],
+				mi.is_low
+			FROM #MissingIndexes AS mi
+			LEFT JOIN create_date AS cd
+			ON mi.[object_id] =  cd.object_id 
+			AND mi.database_id = cd.database_id
+			AND mi.schema_name = cd.schema_name
+			/* Minimum benefit threshold = 100k/day of uptime OR since table creation date, whichever is lower*/
+			WHERE (mi.magic_benefit_number / CASE WHEN cd.create_days < @DaysUptime THEN cd.create_days ELSE @DaysUptime END) >= 100000
+			UNION ALL
+			SELECT               
+				@ScriptVersionName,   
+				N'From Your Community Volunteers' ,   
+				N'http://FirstResponderKit.org' ,
+				100000000000,
+				N'',
+				NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
+				NULL, 0 AS [Display Order], NULL AS is_low
+			ORDER BY [Display Order] ASC, is_low, [Magic Benefit Number] DESC
+			OPTION (RECOMPILE);
+	  	END;
 
-    END /* End @Mode=3 (index detail)*/
-END
+	IF  (@BringThePain = 1
+	AND @DatabaseName IS NOT NULL
+	AND @GetAllDatabases = 0)
+
+	BEGIN
+
+		EXEC sp_BlitzCache @SortOrder = 'sp_BlitzIndex', @DatabaseName = @DatabaseName, @BringThePain = 1, @QueryFilter = 'statement', @HideSummary = 1;
+	                              
+	END;
+
+
+    END; /* End @Mode=3 (index detail)*/
+END;
 END TRY
 
 BEGIN CATCH
         RAISERROR (N'Failure analyzing temp tables.', 0,1) WITH NOWAIT;
 
-        SELECT    @msg = ERROR_MESSAGE(), @ErrorSeverity = ERROR_SEVERITY(), @ErrorState = ERROR_STATE();
+        SELECT  @msg = ERROR_MESSAGE(), @ErrorSeverity = ERROR_SEVERITY(), @ErrorState = ERROR_STATE();
 
         RAISERROR (@msg, 
                @ErrorSeverity, 
