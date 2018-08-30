@@ -6,8 +6,8 @@ Before adding a new check, make sure to add a Github issue for it first, and hav
 
 If you want to change anything about a check - the priority, finding, URL, or ID - open a Github issue first. The relevant scripts have to be updated too.
 
-CURRENT HIGH CHECKID: 212
-If you want to add a new one, start at 213
+CURRENT HIGH CHECKID: 218.  
+If you want to add a new one, start at 219.
 
 | Priority | FindingsGroup | Finding | URL | CheckID |
 |----------|-----------------------------|---------------------------------------------------------|------------------------------------------------------------------------|----------|
@@ -68,7 +68,8 @@ If you want to add a new one, start at 213
 | 50 | Reliability | Transaction Log Larger than Data File | https://www.BrentOzar.com/go/biglog | 75 |
 | 50 | Reliability | Default Trace File Error | https://BrentOzar.com/go/defaulttrace | 199 |
 | 100 | In-Memory OLTP (Hekaton) | Transaction Errors | https://www.BrentOzar.com/go/hekaton | 147 |
-| 100 | Features | Missing Features | https://www.BrentOzar.com/ | 189 |
+| 100 | Features | Missing Features (2016 SP1) | https://www.BrentOzar.com/ | 189 |
+| 100 | Features | Missing Features (2017 CU3) | https://www.BrentOzar.com/ | 216 |
 | 100 | Performance | Change Tracking Enabled | https://www.BrentOzar.com/go/tracking | 112 |
 | 100 | Performance | Fill Factor Changed | https://www.BrentOzar.com/go/fillfactor | 60 |
 | 100 | Performance | High Number of Cached Plans | https://www.BrentOzar.com/go/planlimits | 161 |
@@ -85,6 +86,8 @@ If you want to add a new one, start at 213
 | 100 | Performance | Single-Use Plans in Procedure Cache | https://www.BrentOzar.com/go/single | 35 |
 | 100 | Performance | Stored Procedure WITH RECOMPILE | https://www.BrentOzar.com/go/recompile | 78 |
 | 100 | Performance | Unusual SQL Server Edition | https://www.BrentOzar.com/go/workgroup | 97 |
+| 100 | Performance | Implicit Transactions | https://www.brentozar.com/go/ImplicitTransactions/ | 215 |
+| 100 | Reliability | Cumulative Update Available | https://SQLServerUpdates.com | 217 |
 | 110 | Performance | Active Tables Without Clustered Indexes | https://www.BrentOzar.com/go/heaps | 38 |
 | 110 | Performance | Auto-Create Stats Disabled | https://www.BrentOzar.com/go/acs | 15 |
 | 110 | Performance | Auto-Update Stats Disabled | https://www.BrentOzar.com/go/aus | 16 |
@@ -103,6 +106,7 @@ If you want to add a new one, start at 213
 | 150 | Performance | Foreign Keys Not Trusted | https://www.BrentOzar.com/go/trust | 48 |
 | 150 | Performance | Inactive Tables Without Clustered Indexes | https://www.BrentOzar.com/go/heaps | 39 |
 | 150 | Performance | Leftover Fake Indexes From Wizards | https://www.BrentOzar.com/go/hypo | 46 |
+| 150 | Performance | Objects created with dangerous SET Options | https://www.BrentOzar.com/go/badset | 218 |
 | 150 | Performance | Queries Forcing Join Hints | https://www.BrentOzar.com/go/hints | 45 |
 | 150 | Performance | Queries Forcing Order Hints | https://www.BrentOzar.com/go/hints | 44 |
 | 150 | Performance | Slow Storage Reads on Drive <DRIVELETTER> | https://www.BrentOzar.com/go/slow | 36 |
@@ -254,6 +258,7 @@ If you want to add a new one, start at 213
 | 210 | Non-Default Database Scoped Config | Query Optimizer Hotfixes | https://www.BrentOzar.com/go/dbscope | 197 |
 | 230 | Security | Control Server Permissions | https://www.BrentOzar.com/go/sa | 104 |
 | 230 | Security | Database Owner <> SA | https://www.BrentOzar.com/go/owndb | 55 |
+| 230 | Security | Database Owner is Unknown |  | 213 |
 | 230 | Security | Elevated Permissions on a Database | https://www.BrentOzar.com/go/elevated | 86 |
 | 230 | Security | Endpoints Owned by Users | https://www.BrentOzar.com/go/owners | 187 |
 | 230 | Security | Jobs Owned By Users | https://www.BrentOzar.com/go/owners | 6 |
@@ -268,6 +273,7 @@ If you want to add a new one, start at 213
 | 250 | Informational | SQL Server Agent is running under an NT Service account | https://www.BrentOzar.com/go/setup | 170 |
 | 250 | Informational | SQL Server is running under an NT Service account | https://www.BrentOzar.com/go/setup | 169 |
 | 250 | Server Info | Agent is Currently Offline |  | 167 |
+| 250 | Server Info | Container | https://www.BrentOzar.com/go/virtual | 214 |
 | 250 | Server Info | Default Trace Contents | https://www.BrentOzar.com/go/trace | 106 |
 | 250 | Server Info | Drive Space |  | 92 |
 | 250 | Server Info | Full-text Filter Daemon is Currently Offline |  | 168 |

@@ -28,8 +28,8 @@ SET NOCOUNT ON;
 BEGIN;
 
 DECLARE @Version VARCHAR(30);
-SET @Version = '2.2';
-SET @VersionDate = '20180201';
+SET @Version = '2.8';
+SET @VersionDate = '20180801';
 
 IF @Help = 1
 
@@ -76,7 +76,7 @@ BEGIN
 	
 	    MIT License
 		
-		Copyright (c) 2017 Brent Ozar Unlimited
+		Copyright (c) 2018 Brent Ozar Unlimited
 	
 		Permission is hereby granted, free of charge, to any person obtaining a copy
 		of this software and associated documentation files (the "Software"), to deal
@@ -1173,6 +1173,7 @@ IF @Restore = 1
 											  	AND rw.last_log_restore_finish_time = '9999-12-31 00:00:00.000'
                                                 AND (rw.error_number IS NULL OR rw.error_number > 0) /* negative numbers indicate human attention required */
 											  )
+										AND rw.ignore_database = 0
 										ORDER BY rw.last_log_restore_start_time ASC, rw.last_log_restore_finish_time ASC, rw.database_name ASC;
 	
 								

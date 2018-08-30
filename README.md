@@ -7,18 +7,21 @@
 
 Navigation
  - [How to Get Support](#how-to-get-support)
- - [sp_Blitz: Overall Health Check](#sp_blitz-overall-health-check)
-   - [Advanced sp_Blitz Parameters](#advanced-sp_blitz-parameters)
-     - [Writing sp_Blitz Output to a Table](#writing-sp_blitz-output-to-a-table)
-     - [Skipping Checks or Databases](#skipping-checks-or-databases)
- - [sp_BlitzCache: Find the Most Resource-Intensive Queries](#sp_blitzcache-find-the-most-resource-intensive-queries)
-   - [Advanced sp_BlitzCache Parameters](#advanced-sp_blitzcache-parameters)
- - [sp_BlitzIndex: Tune Your Indexes](#sp_blitzindex-tune-your-indexes)
-   - [Advanced sp_BlitzIndex Parameters](#advanced-sp_blitzindex-parameters)
- - [sp_BlitzFirst: Real-Time Performance Advice](#sp_blitzfirst-real-time-performance-advice)
- - [sp_BlitzWho: What Queries are Running Now](#sp_blitzwho-what-queries-are-running-now)
- - [sp_BlitzQueryStore: Like BlitzCache, for Query Store](#sp_blitzquerystore-query-store-sale)
- - [sp_BlitzLock: Deadlock Analysis](#sp_blitzlock-deadlock-analysis) 
+ - Common Scripts:
+   - [sp_Blitz: Overall Health Check](#sp_blitz-overall-health-check)
+     - [Advanced sp_Blitz Parameters](#advanced-sp_blitz-parameters)
+       - [Writing sp_Blitz Output to a Table](#writing-sp_blitz-output-to-a-table)
+       - [Skipping Checks or Databases](#skipping-checks-or-databases)
+   - [sp_BlitzCache: Find the Most Resource-Intensive Queries](#sp_blitzcache-find-the-most-resource-intensive-queries)
+     - [Advanced sp_BlitzCache Parameters](#advanced-sp_blitzcache-parameters)
+   - [sp_BlitzFirst: Real-Time Performance Advice](#sp_blitzfirst-real-time-performance-advice)
+   - [sp_BlitzIndex: Tune Your Indexes](#sp_blitzindex-tune-your-indexes)
+     - [Advanced sp_BlitzIndex Parameters](#advanced-sp_blitzindex-parameters)
+ - Performance Tuning:   
+   - [sp_BlitzInMemoryOLTP: Hekaton Analysis](#sp_blitzinmemoryoltp-hekaton-analysis) 
+   - [sp_BlitzLock: Deadlock Analysis](#sp_blitzlock-deadlock-analysis) 
+   - [sp_BlitzQueryStore: Like BlitzCache, for Query Store](#sp_blitzquerystore-query-store-sale)
+   - [sp_BlitzWho: What Queries are Running Now](#sp_blitzwho-what-queries-are-running-now)
  - Backups and Restores:
    - [sp_BlitzBackups: How Much Data Could You Lose](#sp_blitzbackups-how-much-data-could-you-lose)  
    - [sp_AllNightLog: Back Up Faster to Lose Less Data](#sp_allnightlog-back-up-faster-to-lose-less-data)  
@@ -48,7 +51,7 @@ The First Responder Kit runs on:
 ## How to Get Support
 Everyone here is expected to abide by the [Contributor Covenant Code of Conduct](CONTRIBUTING.md#the-contributor-covenant-code-of-conduct).
 
-When you have questions about how the tools work, talk with the community in the [#FirstResponderKit Slack channel](https://sqlcommunity.slack.com/messages/firstresponderkit/). If you need a free invite, hit [SQLslack.com](https://SQLslack.com/). Be patient - it's staffed with volunteers who have day jobs, heh.
+When you have questions about how the tools work, talk with the community in the [#FirstResponderKit Slack channel](https://sqlcommunity.slack.com/messages/firstresponderkit/). If you need a free invite, hit [SQLslack.com](http://SQLslack.com/). Be patient - it's staffed with volunteers who have day jobs, heh.
 
 When you find a bug or want something changed, [read the contributing.md file](CONTRIBUTING.md).
 
@@ -172,6 +175,58 @@ In addition to the [parameters common to many of the stored procedures](#paramet
 
 [*Back to top*](#header1)
 
+## sp_BlitzFirst: Real-Time Performance Advice
+
+When performance emergencies strike, this should be the first stored proc in the kit you run.
+
+It takes a sample from a bunch of DMVs (wait stats, Perfmon counters, plan cache), waits 5 seconds, and then takes another sample. It examines the differences between the samples, and then gives you a prioritized list of things that might be causing performance issues right now. Examples include:
+
+* Data or log file growing (or heaven forbid, shrinking)
+* Backup or restore running
+* DBCC operation happening
+
+If no problems are found, it'll tell you that too. That's one of our favorite features because you can have your help desk team run sp_BlitzFirst and read the output to you over the phone. If no problems are found, you can keep right on drinking at the bar. (Ha! Just kidding, you'll still have to close out your tab, but at least you'll feel better about finishing that drink rather than trying to sober up.)
+
+Common sp_BlitzFirst parameters include:
+
+* @Seconds = 5 by default. You can specify longer samples if you want to track stats during a load test or demo, for example.
+* @ShowSleepingSPIDs = 0 by default. When set to 1, shows long-running sleeping queries that might be blocking others.
+* @ExpertMode = 0 by default. When set to 1, it calls sp_BlitzWho when it starts (to show you what queries are running right now), plus outputs additional result sets for wait stats, Perfmon counters, and file stats during the sample, then finishes with one final execution of sp_BlitzWho to show you what was running at the end of the sample.
+
+### Logging sp_BlitzFirst to Tables
+
+You can log sp_BlitzFirst performance data to tables and then analyze the results with the Power BI dashboard. To do it, schedule an Agent job to run sp_BlitzFirst every 15 minutes with these parameters populated:
+
+* @OutputDatabaseName = typically 'DBAtools'
+* @OutputSchemaName = 'dbo'
+* @OutputTableName = 'BlitzFirst' - the quick diagnosis result set goes here
+* @OutputTableNameFileStats = 'BlitzFirst_FileStats'
+* @OutputTableNamePerfmonStats = 'BlitzFirst_PerfmonStats'
+* @OutputTableNameWaitStats = 'BlitzFirst_WaitStats'
+* @OutputTableNameBlitzCache = 'BlitzCache' 
+
+All of the above OutputTableName parameters are optional: if you don't want to collect all of the stats, you don't have to. Keep in mind that the sp_BlitzCache results will get large, fast, because each execution plan is megabytes in size.
+
+Then fire up the [First Responder Kit Power BI dashboard.](https://www.brentozar.com/first-aid/first-responder-kit-power-bi-dashboard/)
+
+### Logging Performance Tuning Activities
+
+On the Power BI Dashboard, you can show lines for your own activities like tuning queries, adding indexes, or changing configuration settings. To do it, run sp_BlitzFirst with these parameters:
+
+* @OutputDatabaseName = typically 'DBAtools'
+* @OutputSchemaName = 'dbo'
+* @OutputTableName = 'BlitzFirst' - the quick diagnosis result set goes here
+* @LogMessage = 'Whatever you wanna show in the Power BI dashboard'
+
+Optionally, you can also pass in:
+
+* @LogMessagePriority = 1
+* @LogMessageFindingsGroup = 'Logged Message'
+* @LogMessageFinding = 'Logged from sp_BlitzFirst' - you could use other values here to track other data sources like DDL triggers, Agent jobs, ETL jobs
+* @LogMessageURL = 'https://OurHelpDeskSystem/ticket/?12345' - or maybe a Github issue, or Pagerduty alert
+* @LogMessageCheckDate = '2017/10/31 11:00' - in case you need to log a message for a prior date/time, like if you forgot to log the message earlier
+
+[*Back to top*](#header1)
 
 ## sp_BlitzIndex: Tune Your Indexes
 
@@ -202,67 +257,41 @@ In addition to the [parameters common to many of the stored procedures](#paramet
 [*Back to top*](#header1)
 
 
-## sp_BlitzFirst: Real-Time Performance Advice
+## sp_BlitzInMemoryOLTP: Hekaton Analysis
 
-When performance emergencies strike, this should be the first stored proc in the kit you run.
+Examines your usage of In-Memory OLTP tables. Parameters you can use:
 
-It takes a sample from a bunch of DMVs (wait stats, Perfmon counters, plan cache), waits 5 seconds, and then takes another sample. It examines the differences between the samples, and then gives you a prioritized list of things that might be causing performance issues right now. Examples include:
+* @instanceLevelOnly BIT: This flag determines whether or not to simply report on the server-level environment (if applicable, i.e. there is no server-level environment for Azure SQL Database). With this parameter, memory-optimized databases are ignored. If you specify @instanceLevelOnly and a database name, the database name is ignored.
+* @dbName NVARCHAR(4000) = N'ALL' - If you don't specify a database name, then sp_BlitzInMemoryOLTP reports on all memory-optimized databases within the instance that it executes in, or in the case of Azure SQL Database, the database that you provisioned. This is because the default for the @dbName parameter is N'ALL'.
+* @tableName NVARCHAR(4000) = NULL
+* @debug BIT
 
-* Data or log file growing (or heaven forbid, shrinking)
-* Backup or restore running
-* DBCC operation happening
+To interpret the output of this stored procedure, read [Ned Otter's sp_BlitzInMemoryOLTP documentation](http://nedotter.com/archive/2018/06/new-kid-on-the-block-sp_blitzinmemoryoltp/).
 
-If no problems are found, it'll tell you that too. That's one of our favorite features because you can have your help desk team run sp_BlitzFirst and read the output to you over the phone. If no problems are found, you can keep right on drinking at the bar. (Ha! Just kidding, you'll still have to close out your tab, but at least you'll feel better about finishing that drink rather than trying to sober up.)
-
-Common sp_BlitzFirst parameters include:
-
-* @Seconds = 5 by default. You can specify longer samples if you want to track stats during a load test or demo, for example.
-* @ShowSleepingSPIDs = 0 by default. When set to 1, shows long-running sleeping queries that might be blocking others.
-* @ExpertMode = 0 by default. When set to 1, it calls sp_BlitzWho when it starts (to show you what queries are running right now), plus outputs additional result sets for wait stats, Perfmon counters, and file stats during the sample, then finishes with one final execution of sp_BlitzWho to show you what was running at the end of the sample.
-
-### Logging sp_BlitzFirst to Tables
-
-You can log sp_BlitzFirst performance data to tables and then analyze the results with the Power BI dashboard. To do it, schedule an Agent job to run sp_BlitzFirst every 15 minutes with these parameters populated:
-
-* @OutputDatabaseName = typically 'DBAtools'
-* @OutputSchemaName = 'dbo'
-* @OutputTableName = 'BlitzFirst' - the quick diagnosis result set goes here
-* @OutputTableName_FileStats = 'BlitzFirst_FileStats'
-* @OutputTableName_PerfmonStats = 'BlitzFirst_PerfmonStats'
-* @OutputTableName_WaitStats = 'BlitzFirst_WaitStats'
-* @OutputTableName_BlitzCache = 'BlitzCache' 
-
-All of the above OutputTableName parameters are optional: if you don't want to collect all of the stats, you don't have to. Keep in mind that the sp_BlitzCache results will get large, fast, because each execution plan is megabytes in size.
-
-Then fire up the [First Responder Kit Power BI dashboard.](https://www.brentozar.com/first-aid/first-responder-kit-power-bi-dashboard/)
-
-### Logging Performance Tuning Activities
-
-On the Power BI Dashboard, you can show lines for your own activities like tuning queries, adding indexes, or changing configuration settings. To do it, run sp_BlitzFirst with these parameters:
-
-* @OutputDatabaseName = typically 'DBAtools'
-* @OutputSchemaName = 'dbo'
-* @OutputTableName = 'BlitzFirst' - the quick diagnosis result set goes here
-* @LogMessage = 'Whatever you wanna show in the Power BI dashboard'
-
-Optionally, you can also pass in:
-
-* @LogMessagePriority = 1
-* @LogMessageFindingsGroup = 'Logged Message'
-* @LogMessageFinding = 'Logged from sp_BlitzFirst' - you could use other values here to track other data sources like DDL triggers, Agent jobs, ETL jobs
-* @LogMessageURL = 'https://OurHelpDeskSystem/ticket/?12345' - or maybe a Github issue, or Pagerduty alert
-* @LogMessageCheckDate = '2017/10/31 11:00' - in case you need to log a message for a prior date/time, like if you forgot to log the message earlier
 
 [*Back to top*](#header1)
 
 
-## sp_BlitzWho: What Queries are Running Now
 
-This is like sp_who, except it goes into way, way, way more details.
+## sp_BlitzLock: Deadlock Analysis
 
-It's designed for query tuners, so it includes things like memory grants, degrees of parallelism, and execution plans.
+Checks either the System Health session or a specific Extended Event session that captures deadlocks and parses out all the XML for you.
+
+Parameters you can use:
+* @Top: Use if you want to limit the number of deadlocks to return. This is ordered by event date ascending.
+* @DatabaseName: If you want to filter to a specific database
+* @StartDate: The date you want to start searching on.
+* @EndDate: The date you want to stop searching on.
+* @ObjectName: If you want to filter to a specific table. The object name has to be fully qualified 'Database.Schema.Table'
+* @StoredProcName: If you want to search for a single stored proc.
+* @AppName: If you want to filter to a specific application.
+* @HostName: If you want to filter to a specific host.
+* @LoginName: If you want to filter to a specific login.
+* @EventSessionPath: If you want to point this at an XE session rather than the system health session.
+
 
 [*Back to top*](#header1)
+
 
 ## sp_BlitzQueryStore: Query Store Sale
 
@@ -286,24 +315,15 @@ Analyzes data in Query Store schema (2016+ only) in many similar ways to what sp
 
 [*Back to top*](#header1)
 
-## sp_BlitzLock: Deadlock Analysis
 
-Checks either the System Health session or a specific Extended Event session that captures deadlocks and parses out all the XML for you.
+## sp_BlitzWho: What Queries are Running Now
 
-Variables you can use:
-* @Top: Use if you want to limit the number of deadlocks to return. This is ordered by event date ascending.
-* @DatabaseName: If you want to filter to a specific database
-* @StartDate: The date you want to start searching on.
-* @EndDate: The date you want to stop searching on.
-* @ObjectName: If you want to filter to a specific table. The object name has to be fully qualified 'Database.Schema.Table'
-* @StoredProcName: If you want to search for a single stored proc.
-* @AppName: If you want to filter to a specific application.
-* @HostName: If you want to filter to a specific host.
-* @LoginName: If you want to filter to a specific login.
-* @EventSessionPath: If you want to point this at an XE session rather than the system health session.
+This is like sp_who, except it goes into way, way, way more details.
 
+It's designed for query tuners, so it includes things like memory grants, degrees of parallelism, and execution plans.
 
 [*Back to top*](#header1)
+
 
 ## sp_BlitzBackups: How Much Data Could You Lose
 
